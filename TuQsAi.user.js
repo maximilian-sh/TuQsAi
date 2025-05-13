@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TuQsAi
-// @version      0.2
-// @description  Uses an LLM via the Groq API to suggest answers for Moodle (Tuwel) quizzes.
+// @version      0.3
+// @description  Uses the Gemini API (via an OpenAI-compatible endpoint) to suggest answers for Moodle (Tuwel) quizzes.
 // @author       maximilian
 // @copyright    2025 maximilian, Adapted from Jakob Kinne's script
 // @require      http://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js
@@ -13,21 +13,21 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @connect      api.groq.com
+// @connect      generativelanguage.googleapis.com
 // ==/UserScript==
 
 (function () {
     'use strict';
 
     // --- Configuration Keys (for GM_getValue/GM_setValue) ---
-    const CONFIG_API_KEY = 'llm_api_key';
-    const CONFIG_MODEL = 'llm_model';
-    const DEFAULT_MODEL = 'qwen-qwq-32b'; // Default model if not configured
-    const GROQ_API_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+    const GEMINI_API_KEY = 'gemini_api_key';
+    const GEMINI_MODEL = 'gemini_model';
+    const DEFAULT_MODEL = 'gemini-2.5-flash-preview-04-17';
+    const GEMINI_API_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
 
     // --- Get Configuration --- 
-    let llmApiKey = GM_getValue(CONFIG_API_KEY, null);
-    let llmModel = GM_getValue(CONFIG_MODEL, DEFAULT_MODEL);
+    let llmApiKey = GM_getValue(GEMINI_API_KEY, null);
+    let llmModel = GM_getValue(GEMINI_MODEL, DEFAULT_MODEL);
 
     // --- Constants ---
     const STATES = {
@@ -182,10 +182,10 @@
                 return reject("Missing question or options for LLM.");
             }
             if (!llmApiKey) {
-                 llmApiKey = prompt("Groq API Key not found. Please enter your Groq API key:");
+                 llmApiKey = prompt("Gemini API Key not found. Please enter your Gemini API key:");
                  if (llmApiKey && llmApiKey.trim()) {
-                      GM_setValue(CONFIG_API_KEY, llmApiKey.trim());
-                      console.log("TuQS LLM: Groq API Key saved.");
+                      GM_setValue(GEMINI_API_KEY, llmApiKey.trim());
+                      console.log("TuQS LLM: Gemini API Key saved.");
                  } else {
                      alert("No API Key provided. Script cannot get suggestions.");
                      return reject("API Key not configured.");
@@ -201,7 +201,7 @@
             // --- GM_xmlhttpRequest Configuration ---
             GM_xmlhttpRequest({
                 method: "POST",
-                url: GROQ_API_ENDPOINT, // Use constant endpoint
+                url: GEMINI_API_ENDPOINT, // Use constant endpoint
                 headers: {
                     "Content-Type": "application/json",
                     "Authorization": `Bearer ${llmApiKey}` // Use stored/prompted key
@@ -217,7 +217,7 @@
                     // stop: ["\n\n"] // Optional stop sequences
                     // --- End of LLM API specific payload ---
                 }),
-                timeout: 30000, // 30 seconds timeout
+                timeout: 60000, // 60 seconds timeout (increased from 30)
                 onload: function (response) {
                     try {
                         console.log("TuQS LLM: Raw LLM response:", response.responseText);
@@ -231,7 +231,7 @@
                         } else {
                              // Add fallbacks or checks for other possible Groq response structures if necessary
                              console.error("TuQS LLM: LLM response format unexpected:", responseData);
-                             throw new Error("LLM response format unexpected. Check Groq API documentation.");
+                             throw new Error("LLM response format unexpected. Check Gemini API documentation.");
                          }
                         // --- End of LLM API specific parsing ---
 
@@ -293,13 +293,13 @@
             }
             if (!llmApiKey) {
                  // Check if API key was set via prompt in a previous call within the same page load
-                 llmApiKey = GM_getValue(CONFIG_API_KEY, null);
+                 llmApiKey = GM_getValue(GEMINI_API_KEY, null);
                  if (!llmApiKey) {
                      // If still null, prompt again (should be rare unless first prompt was cancelled)
-                     llmApiKey = prompt("Groq API Key not found. Please enter your Groq API key:");
+                     llmApiKey = prompt("Gemini API Key not found. Please enter your Gemini API key:");
                      if (llmApiKey && llmApiKey.trim()) {
-                         GM_setValue(CONFIG_API_KEY, llmApiKey.trim());
-                         console.log("TuQS LLM: Groq API Key saved.");
+                         GM_setValue(GEMINI_API_KEY, llmApiKey.trim());
+                         console.log("TuQS LLM: Gemini API Key saved.");
                      } else {
                          alert("No API Key provided. Script cannot get suggestions.");
                          return reject("API Key not configured.");
@@ -317,7 +317,7 @@
 
             GM_xmlhttpRequest({
                 method: "POST",
-                url: GROQ_API_ENDPOINT,
+                url: GEMINI_API_ENDPOINT,
                 headers: {
                     "Content-Type": "application/json",
                     "Authorization": `Bearer ${llmApiKey}` // Use stored/prompted key
@@ -723,8 +723,8 @@
         console.log(`TuQsAi: Using Model: ${llmModel}`);
 
         // Configuration Check
-        if (!GM_getValue(CONFIG_API_KEY, null)) {
-            console.warn("TuQsAi: Groq API Key not set. Will prompt on first use.");
+        if (!GM_getValue(GEMINI_API_KEY, null)) {
+            console.warn("TuQsAi: Gemini API Key not set. Will prompt on first use.");
         }
 
         if (STATE === STATES.answerQuiz) {
