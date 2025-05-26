@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TuQsAi
-// @version      0.3
-// @description  Uses the Gemini API (via an OpenAI-compatible endpoint) to suggest answers for Moodle (Tuwel) quizzes.
+// @version      0.5
+// @description  Solve Moodle (Tuwel) quizzes with ai.
 // @author       maximilian
 // @copyright    2025 maximilian, Adapted from Jakob Kinne's script
 // @require      http://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js
@@ -16,18 +16,19 @@
 // @connect      generativelanguage.googleapis.com
 // ==/UserScript==
 
-(function () {
+// Wrap entire script in an async IIFE to use await at the top level
+(async function () {
     'use strict';
 
     // --- Configuration Keys (for GM_getValue/GM_setValue) ---
-    const GEMINI_API_KEY = 'gemini_api_key';
-    const GEMINI_MODEL = 'gemini_model';
-    const DEFAULT_MODEL = 'gemini-2.5-flash-preview-04-17';
-    const GEMINI_API_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+    const CONFIG_API_KEY = 'gemini_api_key'; // Standardized key
+    const CONFIG_MODEL = 'gemini_model';   // Standardized key
+    const DEFAULT_MODEL = 'gemini-2.5-flash-preview-05-20'; // Model supporting multimodal
+    const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/";
 
-    // --- Get Configuration --- 
-    let llmApiKey = GM_getValue(GEMINI_API_KEY, null);
-    let llmModel = GM_getValue(GEMINI_MODEL, DEFAULT_MODEL);
+    // --- Get Configuration ---
+    let llmApiKey = GM_getValue(CONFIG_API_KEY, null);
+    let llmModel = GM_getValue(CONFIG_MODEL, DEFAULT_MODEL);
 
     // --- Constants ---
     const STATES = {
@@ -39,40 +40,81 @@
     const STATE = (HREF.pathname.includes("view.php")) ? STATES.viewQuiz : STATES.answerQuiz;
 
     const QUESTION_TYPES = {
-        multiplechoice: "multichoice",        // Single or multiple correct answers (radio/checkbox)
-        truefalse: "truefalse",                // True/false (radio)
-        ddwtos: "ddwtos"                    // Drag and drop words onto text
-        // Add other types here if the LLM should handle them and logic is implemented
-        // multiplechoiceset: "multichoiceset", // Usually same as multichoice
-        // select: "match",
-        // multianswer: "multianswer",
-        // dragndropimage: "ddimageortext",
-        // dragndroptext: "ddwtos",
-        // shortanswer: "shortanswer",
+        multiplechoice: "multichoice",
+        truefalse: "truefalse",
+        ddwtos: "ddwtos"
     };
 
-    // Only handle types we have implemented logic for
     const AVAILABLE_TYPES = [
         QUESTION_TYPES.truefalse,
         QUESTION_TYPES.multiplechoice,
-        QUESTION_TYPES.ddwtos // Add new type here
+        QUESTION_TYPES.ddwtos
     ];
 
-    // --- Global Variables ---
-    let question_type = getQuestionType();
-    let question_text = $(".qtext")?.text()?.trim();
-    let answer_options = getAnswerOptions(); // Holds { id: string, text: string } for each option
+    // --- Helper Functions for Image Processing ---
+    function getImageMimeType(url) {
+        if (typeof url !== 'string') return 'application/octet-stream';
+        const extension = url.substring(url.lastIndexOf('.') + 1).toLowerCase();
+        switch (extension) {
+            case 'png': return 'image/png';
+            case 'jpg':
+            case 'jpeg': return 'image/jpeg';
+            case 'gif': return 'image/gif';
+            case 'webp': return 'image/webp';
+            default: return 'application/octet-stream'; // Fallback
+        }
+    }
+
+    async function fetchImageAsBase64(imageUrl) {
+        return new Promise((resolve, reject) => {
+            if (!imageUrl) {
+                return reject(new Error('Image URL is null or empty.'));
+            }
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: imageUrl,
+                responseType: 'blob',
+                onload: function(response) {
+                    if (response.status === 200 && response.response) {
+                        const blob = response.response;
+                        const reader = new FileReader();
+                        reader.onloadend = function() {
+                            const base64data = reader.result.split(',')[1];
+                            resolve({
+                                mimeType: blob.type && blob.type !== 'application/octet-stream' ? blob.type : getImageMimeType(imageUrl),
+                                data: base64data
+                            });
+                        };
+                        reader.onerror = function(e) {
+                            console.error('FileReader error for image:', imageUrl, e);
+                            reject(new Error('FileReader error for image: ' + imageUrl));
+                        };
+                        reader.readAsDataURL(blob);
+                    } else {
+                        console.error(`Failed to fetch image ${imageUrl}: Status ${response.status}`, response);
+                        reject(new Error(`Failed to fetch image ${imageUrl}: ${response.statusText || response.status}`));
+                    }
+                },
+                onerror: function(error) {
+                    console.error(`GM_xmlhttpRequest error for image ${imageUrl}:`, error);
+                    reject(new Error(`GM_xmlhttpRequest error for image ${imageUrl}`));
+                },
+                ontimeout: function() {
+                    console.error(`Timeout fetching image ${imageUrl}`);
+                    reject(new Error(`Timeout fetching image ${imageUrl}`));
+                }
+            });
+        });
+    }
+
 
     // --- Functions ---
 
     function getQuestionType() {
         let question = $(".que");
         if (!question.length) return null;
-
         for (const type of Object.values(QUESTION_TYPES)) {
-            if (question.hasClass(type)) {
-                return type;
-            }
+            if (question.hasClass(type)) return type;
         }
         console.warn("TuQS LLM: Unknown question type.");
         return null;
@@ -82,55 +124,90 @@
         return AVAILABLE_TYPES.includes(question_type);
     }
 
-    // Extracts answer options { id: unique hash, text: display text }
-    function getAnswerOptions() {
+    // Extracts question text and fetches image data from the question body
+    async function getQuestionData() {
+        const qtextElement = $(".qtext").first();
+        if (!qtextElement.length) return { textForPrompt: "", imagesData: [] };
+
+        // For text, clone the element, remove images, then get text to avoid alt text duplication
+        const qtextCloneForText = qtextElement.clone();
+        qtextCloneForText.find('img').remove(); // Remove images before getting text
+        const textForPrompt = qtextCloneForText.text()?.trim() || "";
+
+        const imagesData = [];
+        const imageElements = qtextElement.find('img');
+
+        for (const imgEl of imageElements.get()) {
+            const $img = $(imgEl);
+            const imageUrl = $img.attr('src');
+            if (imageUrl) {
+                try {
+                    const absoluteImageUrl = new URL(imageUrl, window.location.href).href;
+                    const imageData = await fetchImageAsBase64(absoluteImageUrl);
+                    if (imageData) imagesData.push(imageData);
+                } catch (e) {
+                    console.warn(`TuQS LLM: Failed to fetch question image data for ${imageUrl}:`, e.message);
+                }
+            }
+        }
+        // console.log("TuQS LLM: Extracted Question Data - Text:", textForPrompt, "Images found:", imagesData.length);
+        return { textForPrompt, imagesData };
+    }
+
+
+    // Extracts answer options { id, text, inputElement, imageData? }
+    async function getAnswerOptions() {
         const options = [];
-        const answerElements = $(".answer > div"); // Common structure for choices
+        const answerElements = $(".answer > div");
 
         if (!answerElements.length) return options;
 
-        answerElements.each(function () {
+        for (const element of answerElements.get()) {
+            const $this = $(element);
             let textElement, inputElement;
             let text = '';
+            let imageData = null;
 
-            // Find input (radio/checkbox) and text label/container
-            inputElement = $(this).find("input[type='radio'], input[type='checkbox']");
+            inputElement = $this.find("input[type='radio'], input[type='checkbox']");
+            textElement = $this.find("div.flex-fill.ms-1");
+            if (!textElement.length) textElement = $this.find(".ml-1, label");
+            if (!textElement.length) textElement = $this.find("div.flex-grow-1");
+            if (!textElement.length) textElement = $this.find("label");
 
-            // ---- UPDATED SELECTOR LOGIC based on example.html ----
-            // Prioritize the specific structure found: <div class="flex-fill ms-1">
-            textElement = $(this).find("div.flex-fill.ms-1");
+            const imgElement = textElement.find("img").first();
+            if (imgElement.length) {
+                const imageUrl = imgElement.attr('src');
+                text = imgElement.attr('alt')?.trim() || (imageUrl ? `[Image Option (src: ${imageUrl.substring(0,30)+'...'})]` : "[Image Option]");
 
-            // Fallback to previous attempts if the primary selector fails
-            if (!textElement.length) {
-                textElement = $(this).find(".ml-1, label"); // Original fallback
+                if (imageUrl) {
+                    try {
+                        const absoluteImageUrl = new URL(imageUrl, window.location.href).href;
+                        imageData = await fetchImageAsBase64(absoluteImageUrl);
+                    } catch (e) {
+                        console.warn(`TuQS LLM: Failed to fetch answer image data for ${imageUrl}:`, e.message);
+                    }
+                }
+            } else {
+                text = textElement.first().text()?.trim();
             }
-            if (!textElement.length) {
-                textElement = $(this).find("div.flex-grow-1"); // Another original fallback
-            }
-             if (!textElement.length) {
-                 // Final fallback: check the direct label (for very simple true/false?)
-                 textElement = $(this).find("label");
-             }
-            // ---- END UPDATED SELECTOR LOGIC ----
-
-            text = textElement.first().text()?.trim();
 
             if (inputElement.length && text) {
-                const id = md5(text + inputElement.attr('name') + inputElement.attr('value')); // Create a unique enough ID
-                 options.push({
-                     id: id, // Using md5 hash of text as a simple ID
-                     text: text,
-                     inputElement: inputElement // Store the jQuery object for the input
-                 });
+                const id = md5(text + inputElement.attr('name') + inputElement.attr('value'));
+                options.push({
+                    id: id,
+                    text: text,
+                    inputElement: inputElement,
+                    imageData: imageData
+                });
             } else {
-                 console.warn("TuQS LLM: Could not extract input or text for an answer option:", $(this).html());
+                console.warn("TuQS LLM: Could not extract input or meaningful text/image for an answer option:", $this.html());
             }
-        });
-         console.log("TuQS LLM: Extracted Options:", options);
+        }
+        // console.log("TuQS LLM: Extracted Options (with image data if available):", options.map(o => ({text: o.text, hasImage: !!o.imageData}));
         return options;
     }
 
-    // Extracts data for drag-and-drop onto text questions
+    // Extracts data for drag-and-drop onto text questions (remains unchanged for now)
     function getDragDropTextData() {
         const questionElement = $(".que.ddwtos");
         if (!questionElement.length) return null;
@@ -175,16 +252,20 @@
         };
     }
 
-    // Function to send data to LLM and get suggestions
-    async function getLlmSuggestions(question, options) {
+    // Function to send data to LLM and get suggestions (MULTIMODAL)
+    async function getLlmSuggestions(questionTextForPrompt, questionImagesData, optionsWithImageData) {
         return new Promise((resolve, reject) => {
-            if (!question || options.length === 0) {
-                return reject("Missing question or options for LLM.");
+            if (!questionTextForPrompt && (!questionImagesData || questionImagesData.length === 0)) {
+                return reject("Missing question text and images for LLM.");
             }
+            if (!optionsWithImageData || optionsWithImageData.length === 0) {
+                return reject("Missing options for LLM.");
+            }
+
             if (!llmApiKey) {
-                 llmApiKey = prompt("Gemini API Key not found. Please enter your Gemini API key:");
+                 llmApiKey = prompt("Gemini API Key not found. Please enter your Google AI Studio API key:");
                  if (llmApiKey && llmApiKey.trim()) {
-                      GM_setValue(GEMINI_API_KEY, llmApiKey.trim());
+                      GM_setValue(CONFIG_API_KEY, llmApiKey.trim());
                       console.log("TuQS LLM: Gemini API Key saved.");
                  } else {
                      alert("No API Key provided. Script cannot get suggestions.");
@@ -192,192 +273,234 @@
                  }
             }
 
-            const optionsText = options.map((opt, index) => `${index + 1}. ${opt.text}`).join('\n');
-            // V2 Prompt: Emphasize single choice unless multiple are clearly required.
-            const llmPrompt = `Given the following multiple-choice question from an online quiz, please identify the NUMBER of the correct answer(s).\n\nQuestion:\n${question}\n\nAvailable Options:\n${optionsText}\n\nConsider the context of a university course quiz. Respond ONLY with the number(s) corresponding to the correct option(s) from the list above.\n*   If it is likely a single-choice question, provide ONLY the single best answer number.\n*   If it is clearly a multiple-choice/select-all-that-apply question, list each correct number on a new line.\n\nDo not include the option text, introductory phrases like "The correct answer is:", or any explanations. \n**IMPORTANT: Do NOT include any reasoning, chain-of-thought, or XML/HTML tags (like <think>) in your response.** Just the raw number(s).`;
+            const llmParts = [];
+            const systemInstructionText = "You are an AI assistant helping a student with a multiple-choice quiz. Images may be provided for the question or options. Provide only the number(s) of the correct answer(s) based on the text and images given. Consider all provided information.";
 
-            console.log("TuQsAi: Sending prompt to LLM (asking for number):\n", llmPrompt);
+            // Part 1: Question Text
+            if (questionTextForPrompt) {
+                llmParts.push({ text: `Question:\n${questionTextForPrompt}\n\n` });
+            }
 
-            // --- GM_xmlhttpRequest Configuration ---
+            // Part 2: Question Images
+            if (questionImagesData && questionImagesData.length > 0) {
+                questionImagesData.forEach((imgData, idx) => {
+                    if (imgData && imgData.mimeType && imgData.data) {
+                        // llmParts.push({ text: `[Context for Question Image ${idx + 1} follows]\n` });
+                        llmParts.push({ inlineData: { mimeType: imgData.mimeType, data: imgData.data } });
+                    }
+                });
+            }
+            llmParts.push({ text: "\nAvailable Options:\n" });
+
+            // Part 3 & 4: Options text and images
+            optionsWithImageData.forEach((opt, index) => {
+                llmParts.push({ text: `${index + 1}. ${opt.text}\n` });
+                if (opt.imageData && opt.imageData.mimeType && opt.imageData.data) {
+                    // llmParts.push({ text: `[Context for Option ${index + 1} Image follows]\n` });
+                    llmParts.push({ inlineData: { mimeType: opt.imageData.mimeType, data: opt.imageData.data } });
+                }
+            });
+
+            llmParts.push({ text: `\nConsider the context of a university course quiz. Respond ONLY with the number(s) corresponding to the correct option(s) from the list above.\n*   If it is likely a single-choice question, provide ONLY the single best answer number.\n*   If it is clearly a multiple-choice/select-all-that-apply question, list each correct number on a new line.\n\nDo not include the option text, introductory phrases like "The correct answer is:", or any explanations. \n**IMPORTANT: Do NOT include any reasoning, chain-of-thought, or XML/HTML tags (like <think>) in your response.** Just the raw number(s).` });
+
+            const apiUrl = `${GEMINI_API_BASE_URL}${llmModel}:generateContent?key=${llmApiKey}`;
+
+            // console.log("TuQsAi: Sending multimodal prompt to Gemini. Number of parts:", llmParts.length);
+            // For brevity, log only text parts or image placeholders
+            // console.log("TuQsAi: Prompt Parts Overview:", llmParts.map(p => p.text ? {text: p.text.substring(0,100) + "..."} : {inlineData: `(${p.inlineData.mimeType})`}));
+
+
             GM_xmlhttpRequest({
                 method: "POST",
-                url: GEMINI_API_ENDPOINT, // Use constant endpoint
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${llmApiKey}` // Use stored/prompted key
-                },
+                url: apiUrl,
+                headers: { "Content-Type": "application/json" },
                 data: JSON.stringify({
-                    messages: [
-                       { role: "system", content: "You are an AI assistant helping a student with a multiple-choice quiz. Provide only the exact text of the correct answer(s) based on the options given in the user prompt. Copy the text character-for-character." },
-                       { role: "user", content: llmPrompt } // Use renamed variable
-                    ],
-                     model: llmModel, // Use stored/default model
-                    // max_tokens: 150, // Optional: Groq might have defaults
-                     temperature: 0.1, // Keep low for factual answers
-                    // stop: ["\n\n"] // Optional stop sequences
-                    // --- End of LLM API specific payload ---
+                    contents: [{ role: "user", parts: llmParts }],
+                    systemInstruction: { parts: [{ text: systemInstructionText }] },
+                    generationConfig: {
+                        temperature: 0.1,
+                        // maxOutputTokens: 50, // Optional
+                    }
                 }),
-                timeout: 60000, // 60 seconds timeout (increased from 30)
+                timeout: 60000, // Increased timeout for potentially larger payloads
                 onload: function (response) {
                     try {
-                        console.log("TuQS LLM: Raw LLM response:", response.responseText);
+                        // console.log("TuQS LLM: Raw Gemini response:", response.responseText);
                         const responseData = JSON.parse(response.responseText);
 
-                        // --- Adjust response parsing based on your LLM API's output structure ---
-                        // Example for OpenAI-compatible API like Groq:
                         let rawCompletion = '';
-                        if (responseData.choices && responseData.choices.length > 0 && responseData.choices[0].message) {
-                           rawCompletion = responseData.choices[0].message.content;
+                        if (responseData.candidates && responseData.candidates.length > 0 &&
+                            responseData.candidates[0].content && responseData.candidates[0].content.parts &&
+                            responseData.candidates[0].content.parts.length > 0 && responseData.candidates[0].content.parts[0].text) {
+                           rawCompletion = responseData.candidates[0].content.parts[0].text;
+                        } else if (responseData.promptFeedback && responseData.promptFeedback.blockReason) {
+                            const blockReason = responseData.promptFeedback.blockReason;
+                            const safetyRatings = responseData.promptFeedback.safetyRatings || [];
+                            let blockDetails = `Block reason: ${blockReason}.`;
+                            if (safetyRatings.length > 0) {
+                                blockDetails += ` Safety ratings: ${safetyRatings.map(r => `${r.category} - ${r.probability}`).join(', ')}`;
+                            }
+                            console.error("TuQS LLM: Prompt blocked by Gemini.", blockDetails, "Full feedback:", responseData.promptFeedback);
+                            throw new Error(`LLM prompt blocked: ${blockReason}. Check console for details.`);
                         } else {
-                             // Add fallbacks or checks for other possible Groq response structures if necessary
-                             console.error("TuQS LLM: LLM response format unexpected:", responseData);
-                             throw new Error("LLM response format unexpected. Check Gemini API documentation.");
+                             console.error("TuQS LLM: Gemini response format unexpected:", responseData);
+                             throw new Error("Gemini response format unexpected. Check API documentation or raw response.");
                          }
-                        // --- End of LLM API specific parsing ---
 
-                        if (!rawCompletion) {
-                            throw new Error("LLM response format unexpected or empty completion.");
+                        if (!rawCompletion && !(responseData.promptFeedback && responseData.promptFeedback.blockReason)) {
+                            throw new Error("LLM response format unexpected or empty completion, and not blocked.");
                         }
 
-                        // Remove <think> blocks before parsing
                         let cleanedCompletion = rawCompletion.replace(/<think>.*?<\/think>/gs, '').trim();
+                        console.log("TuQS LLM: Cleaned completion from LLM:", cleanedCompletion); // Log the direct text from LLM
 
-                        // Parse response for option indices
-                        const numOptions = options.length;
-                        const finalSuggestions = cleanedCompletion.split('\n')
+                        const numOptions = optionsWithImageData.length;
+                        const finalSuggestions = cleanedCompletion.split(/\r\n|\r|\n/) // Use regex to split by any common newline
                             .map(s => {
-                                // Clean string: trim, remove trailing dots/junk
                                 const cleaned = s.trim().replace(/[.,;:!?]$/, '').trim();
-                                // Try to parse the beginning as an integer
                                 const potentialIndexNum = parseInt(cleaned, 10);
-                                // Validate: Is it a number and within the valid range of option indices?
                                 if (!isNaN(potentialIndexNum) && potentialIndexNum >= 1 && potentialIndexNum <= numOptions) {
                                     return potentialIndexNum.toString();
                                 }
-                                return null; // Invalid index
+                                return null;
                             })
-                            .filter(s => s !== null); // Remove nulls (invalid indices)
+                            .filter(s => s !== null);
 
                         if (finalSuggestions.length === 0 && cleanedCompletion) {
-                            // Log only if the cleaned response wasn't empty but yielded no valid numbers
-                            console.warn("TuQS LLM: LLM response did not yield a valid option index:", cleanedCompletion);
+                            console.warn("TuQS LLM: Gemini response did not yield a valid option index from:", cleanedCompletion);
                         }
 
-                        console.log("TuQS LLM: Parsed suggested answer number(s):", finalSuggestions);
-
-                        resolve(finalSuggestions); // Resolve with the cleaned array of suggested number strings
+                        // console.log("TuQS LLM: Parsed suggested answer number(s):", finalSuggestions);
+                        resolve(finalSuggestions);
 
                     } catch (error) {
-                        console.error("TuQS LLM: Error parsing LLM response:", error);
+                        console.error("TuQS LLM: Error parsing Gemini response:", error);
                         console.error("TuQS LLM: Raw response text for debugging:", response.responseText);
-                        reject("Failed to parse LLM response: " + error.message);
+                        reject("Failed to parse Gemini response: " + error.message);
                     }
                 },
                 onerror: function (error) {
-                    console.error("TuQS LLM: LLM request error:", error);
-                    reject("LLM request failed: " + JSON.stringify(error));
+                    console.error("TuQS LLM: Gemini request error:", error);
+                    reject("Gemini request failed: " + JSON.stringify(error));
                 },
                 ontimeout: function () {
-                    console.error("TuQS LLM: LLM request timed out.");
-                    reject("LLM request timed out.");
+                    console.error("TuQS LLM: Gemini request timed out.");
+                    reject("Gemini request timed out.");
                 }
             });
         });
     }
 
     // Function to send data to LLM for cloze/drag-drop questions
+    // NOTE: This function has NOT been updated for multimodal input.
+    // If ddwtos questions can contain images that need to be sent to the LLM,
+    // this function will require similar modifications to fetch images and adjust the API call.
     async function getLlmClozeSuggestions(question, dropZoneIds, draggableOptions) {
         return new Promise((resolve, reject) => {
             if (!question || dropZoneIds.length === 0 || draggableOptions.length === 0) {
                 return reject("Missing question, drop zones, or options for LLM cloze request.");
             }
             if (!llmApiKey) {
-                 // Check if API key was set via prompt in a previous call within the same page load
-                 llmApiKey = GM_getValue(GEMINI_API_KEY, null);
+                 llmApiKey = GM_getValue(CONFIG_API_KEY, null); // Corrected constant
                  if (!llmApiKey) {
-                     // If still null, prompt again (should be rare unless first prompt was cancelled)
-                     llmApiKey = prompt("Gemini API Key not found. Please enter your Gemini API key:");
+                     llmApiKey = prompt("Gemini API Key not found. Please enter your Google AI Studio API key:");
                      if (llmApiKey && llmApiKey.trim()) {
-                         GM_setValue(GEMINI_API_KEY, llmApiKey.trim());
+                         GM_setValue(CONFIG_API_KEY, llmApiKey.trim()); // Corrected constant
                          console.log("TuQS LLM: Gemini API Key saved.");
                      } else {
-                         alert("No API Key provided. Script cannot get suggestions.");
-                         return reject("API Key not configured.");
+                         alert("No API Key provided. Script cannot get suggestions for drag & drop.");
+                         return reject("API Key not configured for drag & drop.");
                      }
                  }
             }
+            // Ensure llmModel is available
+            if (!llmModel) {
+                llmModel = GM_getValue(CONFIG_MODEL, DEFAULT_MODEL);
+            }
 
-            const optionsList = draggableOptions.map(opt => `- "${opt}"`).join('\n');
-            const placeholders = dropZoneIds.map(id => `Placeholder ${id}`).join(', ');
+            const optionsList = draggableOptions.map(opt => `- "${opt}"`).join('\\n');
+            const systemInstructionText = "You are an AI assistant helping fill in blanks in a quiz question. Respond ONLY with the requested JSON object mapping placeholders to the provided options.";
+            const llmPrompt = `The following is a question with placeholders (e.g., "Placeholder 1", "Placeholder 2") that need to be filled using items from a list of draggable options.\\n\\nQuestion Context & Placeholders:\\n${question}\\n(Identify where "Placeholder 1", "Placeholder 2", etc. fit in the above text/code based on the dropZoneIds: ${dropZoneIds.join(', ')})\\n\\nAvailable Draggable Options:\\n${optionsList}\\n\\nYour task is to determine which draggable option fits best into each placeholder. Respond ONLY with a valid JSON object mapping each placeholder ID (as a string key, e.g., "1", "2") to the exact text of the draggable option that should go there (as a string value).\\n\\nExample Response Format:\\n{\\n  "1": "SELECT",\\n  "2": "x.speciality",\\n  "3": "COUNT(*)"\\n  ...\\n}\\n\\nDo not include any other text, explanations, or markdown formatting outside the JSON object. The JSON should be the only content in your response.`;
 
-            // --- Specific Prompt for Cloze/DDWTOS --- 
-            const llmPrompt = `The following is a question with placeholders (e.g., "Placeholder 1", "Placeholder 2") that need to be filled using items from a list of draggable options.\n\nQuestion Context & Placeholders:\n${question}\n(Identify where "Placeholder 1", "Placeholder 2", etc. fit in the above text/code)\n\nAvailable Draggable Options:\n${optionsList}\n\nYour task is to determine which draggable option fits best into each placeholder. Respond ONLY with a valid JSON object mapping each placeholder ID (as a string key, e.g., "1", "2") to the exact text of the draggable option that should go there (as a string value).\n\nExample Response Format:\n{\n  "1": "SELECT",\n  "2": "x.speciality",\n  "3": "COUNT(*)"\n  ...\n}\n\nDo not include any other text, explanations, or markdown formatting outside the JSON object.`;
-
-            console.log("TuQsAi (Cloze): Sending prompt:\n", llmPrompt);
+            // console.log("TuQsAi (Cloze): Sending prompt to Gemini:\\n", llmPrompt);
+            const apiUrl = `${GEMINI_API_BASE_URL}${llmModel}:generateContent?key=${llmApiKey}`;
 
             GM_xmlhttpRequest({
                 method: "POST",
-                url: GEMINI_API_ENDPOINT,
+                url: apiUrl, // Corrected API URL
                 headers: {
                     "Content-Type": "application/json",
-                    "Authorization": `Bearer ${llmApiKey}` // Use stored/prompted key
                 },
                 data: JSON.stringify({
-                    messages: [
-                       // Note: System message might need adjustment for this task type
-                       { role: "system", content: "You are an AI assistant helping fill in blanks in a quiz question. Respond only with the requested JSON object mapping placeholders to the provided options." },
-                       { role: "user", content: llmPrompt } // Use renamed variable
-                    ],
-                    model: llmModel, // Use stored/default model
-                    temperature: 0.2, // Slightly higher temp might help with matching tasks
-                    // IMPORTANT: Request JSON output if the API supports it!
-                    response_format: { "type": "json_object" }, // Uncomment/adjust if your LLM API supports forced JSON output
+                    contents: [{ role: "user", parts: [{ text: llmPrompt }] }],
+                    systemInstruction: { parts: [{ text: systemInstructionText }] },
+                    generationConfig: {
+                        temperature: 0.1,
+                    }
                 }),
-                timeout: 45000, // Increased timeout for potentially more complex task
+                timeout: 60000,
                 onload: function (response) {
                     try {
-                        console.log("TuQS LLM (Cloze): Raw LLM response:", response.responseText);
-                        
-                        // 1. Parse the outer Groq API response
-                        const apiResponse = JSON.parse(response.responseText);
+                        // console.log("TuQS LLM (Cloze): Raw Gemini response:", response.responseText);
+                        const responseData = JSON.parse(response.responseText);
 
-                        // 2. Extract the nested content string
-                        let contentString = apiResponse?.choices?.[0]?.message?.content;
-                        if (!contentString || typeof contentString !== 'string') {
-                           throw new Error("Could not find valid LLM message content in API response.");
+                        let rawCompletion = '';
+                        if (responseData.candidates && responseData.candidates.length > 0 &&
+                            responseData.candidates[0].content && responseData.candidates[0].content.parts &&
+                            responseData.candidates[0].content.parts.length > 0 && responseData.candidates[0].content.parts[0].text) {
+                           rawCompletion = responseData.candidates[0].content.parts[0].text;
+                        } else if (responseData.promptFeedback && responseData.promptFeedback.blockReason) {
+                            const blockReason = responseData.promptFeedback.blockReason;
+                            const safetyRatings = responseData.promptFeedback.safetyRatings || [];
+                            let blockDetails = `Block reason: ${blockReason}.`;
+                            if (safetyRatings.length > 0) {
+                                blockDetails += ` Safety ratings: ${safetyRatings.map(r => `${r.category} - ${r.probability}`).join(', ')}`;
+                            }
+                            console.error("TuQS LLM (Cloze): Prompt blocked by Gemini.", blockDetails, "Full feedback:", responseData.promptFeedback);
+                            throw new Error(`LLM cloze prompt blocked: ${blockReason}. Check console for details.`);
+                        } else {
+                             console.error("TuQS LLM (Cloze): Gemini response format unexpected:", responseData);
+                             throw new Error("Gemini cloze response format unexpected. Check API or raw response.");
+                         }
+
+                        if (!rawCompletion && !(responseData.promptFeedback && responseData.promptFeedback.blockReason)) {
+                            throw new Error("LLM cloze response format unexpected or empty completion, and not blocked.");
                         }
-
-                        // 3. Clean potential markdown wrappers from the content string
-                        contentString = contentString.trim();
-                        const jsonMatch = contentString.match(/```json\n(\{.*?\})\n```/s);
+                        
+                        let jsonString = rawCompletion.trim();
+                        const jsonMatch = jsonString.match(/```json\\n(\{[\s\S]*?\})\\n```/s);
                         if (jsonMatch && jsonMatch[1]) {
-                            contentString = jsonMatch[1];
+                            jsonString = jsonMatch[1];
+                        } else {
+                            const firstBrace = jsonString.indexOf('{');
+                            const lastBrace = jsonString.lastIndexOf('}');
+                            if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+                                jsonString = jsonString.substring(firstBrace, lastBrace + 1);
+                            }
                         }
-
-                        // 4. Parse the content string as the final JSON suggestion map
-                        const responseData = JSON.parse(contentString); // Expecting { "1": "text", "2": "text", ... }
                         
-                        // Basic validation: Check if it's an object
-                        if (typeof responseData !== 'object' || responseData === null) {
-                           throw new Error("LLM response was not a valid JSON object.");
+                        const suggestionsMap = JSON.parse(jsonString);
+
+                        if (typeof suggestionsMap !== 'object' || suggestionsMap === null) {
+                           throw new Error("LLM cloze response was not a valid JSON object after cleaning.");
                         }
 
-                        console.log("TuQS LLM (Cloze): Parsed suggestions:", responseData);
-                        resolve(responseData); // Resolve with the mapping object
+                        // console.log("TuQS LLM (Cloze): Parsed suggestions map:", suggestionsMap);
+                        resolve(suggestionsMap);
 
                     } catch (error) {
-                        console.error("TuQS LLM (Cloze): Error parsing LLM JSON response:", error);
+                        console.error("TuQS LLM (Cloze): Error parsing Gemini JSON response:", error);
                         console.error("TuQS LLM (Cloze): Raw response text for debugging:", response.responseText);
-                        reject("Failed to parse LLM JSON response: " + error.message);
+                        reject("Failed to parse Gemini JSON response for cloze: " + error.message);
                     }
                 },
                 onerror: function (error) {
                     console.error("TuQS LLM (Cloze): LLM request error:", error);
-                    reject("LLM request failed: " + JSON.stringify(error));
+                    reject("Gemini cloze request failed: " + JSON.stringify(error));
                 },
                 ontimeout: function () {
                     console.error("TuQS LLM (Cloze): LLM request timed out.");
-                    reject("LLM request timed out.");
+                    reject("Gemini cloze request timed out.");
                 }
              });
         });
@@ -445,7 +568,7 @@
     class BaseQuestionHandler {
         constructor(options) {
             // this.answerElements = $(".answer > div"); // No longer needed if options have elements
-            this.options = options; // Now stores { id, text, inputElement }
+            this.options = options; // Now stores { id, text, inputElement, imageData? }
         }
 
         // Default implementation (should be overridden)
@@ -480,6 +603,7 @@
             });
         }
     }
+    window.truefalse = truefalse; // Assign class to window
 
     class multichoice extends BaseQuestionHandler {
          selectAnswers(targetIdentifiers) {
@@ -529,6 +653,7 @@
              }
          }
      }
+    window.multichoice = multichoice; // Assign class to window object
 
     // --- NEW Handler for Drag-Drop Onto Text ---
     class ddwtos {
@@ -536,203 +661,216 @@
             this.questionText = data.questionText;
             this.dropZones = data.dropZones; // Array of { id: string, element: jQueryObject }
             this.draggableOptions = data.draggableOptions;
-            this.statusDiv = $("#llm-status"); // Assume status div exists
+            // this.statusDiv removed
         }
 
-        async displaySuggestions() {
-            try {
-                this.statusDiv.html("<i>Asking LLM for cloze suggestions...</i>");
-                const dropZoneIds = this.dropZones.map(z => z.id);
-                const suggestions = await getLlmClozeSuggestions(this.questionText, dropZoneIds, this.draggableOptions);
-                // suggestions should be like { "1": "text", "2": "text", ... }
+        async displaySuggestions(suggestions) { // Takes suggestions as argument
+            if (!suggestions || Object.keys(suggestions).length === 0) {
+                displayStatus("<i>LLM did not provide valid suggestions for placeholders or the response was empty.</i>", "warning");
+                return;
+            }
 
-                let suggestionsHtml = '<i>LLM Suggestions:</i><ul style="margin: 0; padding-left: 20px; font-size: 0.9em;">';
-                let suggestionsApplied = 0;
+            let suggestionsHtml = '<i>LLM Suggestions (Drag & Drop):</i><ul style="margin: 0; padding-left: 20px; font-size: 0.9em;">';
+            let suggestionsAppliedCount = 0;
 
-                this.dropZones.forEach(zone => {
-                    const suggestedText = suggestions[zone.id];
-                    if (suggestedText) {
-                        suggestionsApplied++;
-                        suggestionsHtml += `<li>Placeholder ${zone.id}: <b>${suggestedText}</b></li>`;
-                        
-                        // Create and append the suggestion hint near the drop zone
-                        const hint = $('<div class="llm-suggestion-hint"></div>')
-                            .css({
-                                fontSize: '0.8em',
-                                color: '#006400', // Dark green
-                                border: '1px dashed #006400',
-                                padding: '1px 3px',
-                                marginTop: '2px',
-                                display: 'inline-block',
-                                marginLeft: '5px' // Add some space
-                            })
-                            .html(`Suggest: <b>${suggestedText}</b>`);
-                        zone.element.after(hint); // Place the hint after the drop zone span
-                    }
-                });
-                suggestionsHtml += '</ul>';
+            this.dropZones.forEach(zone => {
+                const suggestedText = suggestions[zone.id];
+                if (suggestedText) {
+                    suggestionsAppliedCount++;
+                    suggestionsHtml += `<li>Placeholder ${zone.id}: <b>${suggestedText}</b></li>`;
+                    
+                    // Remove any pre-existing hint for this zone to avoid duplicates
+                    zone.element.next('.llm-suggestion-hint').remove();
 
-                if (suggestionsApplied > 0) {
-                    this.statusDiv.html(suggestionsHtml);
-                    this.statusDiv.css({ borderColor: "#28a745", backgroundColor: "#e9f7ec" });
-                } else {
-                    this.statusDiv.html("<i>LLM did not provide valid suggestions for placeholders.</i>");
-                    this.statusDiv.css({ borderColor: "#ffc107", backgroundColor: "#fff8e1" }); // Warning color
+                    const hint = $('<div class="llm-suggestion-hint"></div>')
+                        .css({
+                            fontSize: '0.8em',
+                            color: '#006400', // Dark green
+                            border: '1px dashed #006400',
+                            padding: '1px 3px',
+                            marginTop: '2px',
+                            display: 'inline-block',
+                            marginLeft: '5px' // Add some space
+                        })
+                        .html(`Suggest: <b>${suggestedText}</b>`);
+                    zone.element.after(hint); // Place the hint after the drop zone span
                 }
+            });
+            suggestionsHtml += '</ul>';
 
-            } catch (error) {
-                console.error("TuQS LLM (DDWTOS): Error getting or displaying suggestions:", error);
-                this.statusDiv.html(`<i>Error getting cloze suggestions: ${error}</i>`);
-                this.statusDiv.css({ borderColor: "#dc3545", backgroundColor: "#f8d7da" });
+            if (suggestionsAppliedCount > 0) {
+                displayStatus(suggestionsHtml, "success");
+            } else {
+                displayStatus("<i>LLM provided suggestions, but none matched the current placeholders.</i>", "warning");
             }
         }
     }
+    window.ddwtos = ddwtos; // Assign class to window object
     // --- END DDWTOS Handler ---
 
-    // --- Main Execution Logic ---
+    // --- UI Functions (Placeholder - adapt to your existing UI logic) ---
+    function displayStatus(message, type = "info") {
+        let statusDiv = $('#llm-status');
+        const questionBlock = $('.que').first();
+        let contentBlock; // Declare here to check its existence later
 
-    async function handleQuizPage() {
-        console.log("TuQSLLM: Handling quiz attempt page.");
-
-        // --- Check if question type is supported --- 
-        if (!isQuestionAnswerable()) {
-            console.log("TuQSLLM: Question type not supported or not found:", question_type);
-            return;
+        if (questionBlock.length) {
+            contentBlock = questionBlock.find('.content').first();
         }
 
-        // --- Check if basic question text was found --- 
-        if (!question_text) { // Check only question_text initially
-            console.error("TuQSLLM: Could not extract question text (.qtext).");
-            return;
-        }
+        if (!statusDiv.length) {
+            if (contentBlock && contentBlock.length) {
+                statusDiv = $('<div id="llm-status"></div>');
+                contentBlock.append(statusDiv); // Append inside the .content block
 
-        // Create a placeholder for status/results - Do this early
-        let statusDiv = document.createElement("div");
-        statusDiv.id = "llm-status";
-        statusDiv.style.marginTop = "10px";
-        statusDiv.style.padding = "8px";
-        statusDiv.style.border = "1px solid #ddd";
-        statusDiv.style.backgroundColor = "#f9f9f9";
-        statusDiv.style.fontSize = "small";
-        statusDiv.innerHTML = "<i>Asking LLM for suggestions...</i>";
-        // Try to insert after the question text container
-        $(".formulation.clearfix").after(statusDiv);
-
-
-        try {
-             console.log("TuQSLLM: Requesting LLM suggestions for:", question_text.substring(0, 100) + "...");
-
-             // --- Logic modification: Handle different question types ---
-             if (question_type === QUESTION_TYPES.ddwtos) {
-                 // Handle drag-and-drop onto text (display suggestions)
-                 const ddData = getDragDropTextData();
-                 if (ddData) {
-                     const controller = new ddwtos(ddData);
-                     await controller.displaySuggestions(); // Call the new method
-                 } else {
-                      statusDiv.innerHTML = `<i>Error: Could not extract data for drag-and-drop question.</i>`;
-                      statusDiv.style.borderColor = "#dc3545";
-                      statusDiv.style.backgroundColor = "#f8d7da";
-                 }
-             } else if ([QUESTION_TYPES.truefalse, QUESTION_TYPES.multiplechoice].includes(question_type)) {
-                 // --- Add check for standard answer options HERE --- 
-                 if (answer_options.length === 0) {
-                     console.error("TuQSLLM: Could not extract standard answer options for this question type.");
-                     statusDiv.innerHTML = `<i>Error: Could not find answer options.</i>`;
-                     statusDiv.style.borderColor = "#dc3545";
-                     statusDiv.style.backgroundColor = "#f8d7da";
-                     return; 
-                 }
-                 // --- End check ---
-
-                 // Handle standard multiple choice / true/false (select answer)
-                 const suggestedNumbers = await getLlmSuggestions(question_text, answer_options); // Renamed variable
-                 console.log("TuQSLLM: Received suggested number(s):", suggestedNumbers);
-
-                 // --- V3: Display TEXT in status, not numbers --- 
-                 let suggestionText = 'None';
-                 let effectiveNumbers = suggestedNumbers; // Default to original suggestions
-
-                 // Determine effective numbers *before* generating text (respecting radio constraint)
-                 const firstInput = answer_options.length > 0 ? answer_options[0].inputElement : null;
-                 const isRadio = firstInput ? firstInput.is(':radio') : false;
-                 if (isRadio && question_type === QUESTION_TYPES.multiplechoice && suggestedNumbers && suggestedNumbers.length > 1) {
-                    effectiveNumbers = [suggestedNumbers[0]]; // Use only first for display if radio + multi-suggest
-                 }
-
-                 if (effectiveNumbers && effectiveNumbers.length > 0) {
-                     suggestionText = effectiveNumbers.map(numStr => {
-                         const index = parseInt(numStr, 10) - 1; // Convert to 0-based index
-                         if (index >= 0 && index < answer_options.length) {
-                             // Truncate long text for display
-                             const fullText = answer_options[index].text;
-                             return `"${fullText.length > 70 ? fullText.substring(0, 67) + '...' : fullText}"`;
-                         } else {
-                             return `(Invalid option number: ${numStr})`;
-                         }
-                     }).join('<br>'); // Display each suggestion on a new line if multiple are effective
-                 }
-                 
-                 statusDiv.innerHTML = `<i>LLM suggested selecting:</i><br><b>${suggestionText}</b>`;
-                 statusDiv.style.borderColor = "#28a745"; // Green border for success
-                 statusDiv.style.backgroundColor = "#e9f7ec";
-                 // --- End V3 Status Text ---
-
-                 // Dynamically create the correct handler instance based on question type
-                 let controller;
-                 // const HandlerClass = window[question_type]; // Access class by string name (ensure classes are globally accessible or refactor)
-
-                 if (question_type === QUESTION_TYPES.truefalse) {
-                      controller = new truefalse(answer_options);
-                 } else if (question_type === QUESTION_TYPES.multiplechoice) {
-                      controller = new multichoice(answer_options);
-                 }
-                 // Add other types here if needed:
-                 // else if (question_type === QUESTION_TYPES.select) { controller = new select(answer_options); }
-
-                 if (controller && typeof controller.selectAnswers === 'function') {
-                    controller.selectAnswers(suggestedNumbers); // Pass original numbers to handler
-                } else {
-                     console.error("TuQSLLM: No valid controller/handler found for type:", question_type);
-                     statusDiv.innerHTML = `<i>Error: Could not find handler for question type '${question_type}'. Cannot select answers.</i>`;
-                     statusDiv.style.borderColor = "#dc3545"; // Red border for error
-                     statusDiv.style.backgroundColor = "#f8d7da";
-                 }
+                statusDiv.css({
+                    'width': '100%', // Takes full width of the parent .content's content area
+                    'margin-top': '15px',      // Space from elements above it within .content
+                    'margin-bottom': '10px',   // Space below the status message within .content
+                    'padding': '10px',
+                    'border': '1px solid #ccc',
+                    'background-color': '#f0f0f0',
+                    'box-sizing': 'border-box' // Padding and border included in 100% width
+                });
+            } else if (questionBlock.length) {
+                // Fallback: if .content not found, append to .que (less ideal for specific width)
+                statusDiv = $('<div id="llm-status"></div>');
+                questionBlock.append(statusDiv);
+                console.warn("TuQS LLM: '.content' div not found within '.que'. Status div appended to '.que'. Width might not match '.content' precisely.");
+                statusDiv.css({
+                    'width': '100%', // Full width of .que's content area
+                    'margin-top': '15px',
+                    'margin-bottom': '0',
+                    'padding': '10px',
+                    'border': '1px solid #ccc',
+                    'background-color': '#f0f0f0',
+                    'box-sizing': 'border-box'
+                });
             } else {
-                 // Handle unsupported but detected types gracefully
-                 statusDiv.innerHTML = `<i>Question type '${question_type}' is recognized but not automatically handled by this script.</i>`;
-                 statusDiv.style.borderColor = "#ffc107"; // Warning color
-                 statusDiv.style.backgroundColor = "#fff8e1";
-             }
-             // --- End Logic modification ---
+                // Ultimate Fallback: append to body
+                statusDiv = $('<div id="llm-status"></div>').appendTo('body');
+                statusDiv.css({
+                    'margin-top': '15px',
+                    'padding': '10px',
+                    'border': '1px solid #ccc',
+                    'background-color': '#f0f0f0'
+                });
+            }
+        }
 
-        } catch (error) {
-            console.error("TuQSLLM: Failed to get or apply LLM suggestions:", error);
-            statusDiv.innerHTML = `<i>Error processing LLM suggestion: ${error}</i>`;
-            statusDiv.style.borderColor = "#dc3545"; // Red border for error
-            statusDiv.style.backgroundColor = "#f8d7da";
+        // Determine text color based on type - background and border are fixed now
+        let textColor = 'black'; // Default for info
+        switch (type) {
+            case "error":
+                textColor = 'red';
+                break;
+            case "success":
+                textColor = 'green';
+                break;
+            case "warning":
+                textColor = 'orange';
+                break;
+            // No need for info/default case as textColor is already black
+        }
 
+        // Update content with the determined text color
+        statusDiv.html(`<span style="color: ${textColor};">${message}</span>`);
+        console.log(`TuQS LLM Status (${type}): ${message}`);
+    }
+
+
+    // --- Global Variables Initialization (within async function) ---
+    let question_type = getQuestionType();
+    let questionDataGlobal = { textForPrompt: "", imagesData: [] };
+    let answer_options_data_global = [];
+
+    if (STATE === STATES.answerQuiz && isQuestionAnswerable()) {
+        displayStatus("<i>Extracting question and answer data...</i>", "info");
+        try {
+            questionDataGlobal = await getQuestionData();
+            answer_options_data_global = await getAnswerOptions();
+            // console.log("TuQS LLM: Successfully fetched question and answer data.");
+        } catch (e) {
+            console.error("TuQS LLM: Error during initial data extraction:", e);
+            displayStatus(`<i>Error extracting page data: ${e.message}</i>`, "error");
         }
     }
 
-    // --- Script Entry Point ---
 
-    // Using $(document).ready ensures jQuery is loaded and basic DOM is ready
-    $(document).ready(function () {
-        console.log("TuQsAi Script Loaded. Version 0.4. State:", STATE);
-        console.log(`TuQsAi: Using Model: ${llmModel}`);
+    // --- Main Script Logic ---
+    $(document).ready(async function () { // Ensure DOM is ready, though script is at end.
+        console.log("TuQsAi Script Loaded. Version 0.5. State:", STATE);
+        if (llmModel) console.log("TuQsAi: Using Model:", llmModel);
 
-        // Configuration Check
-        if (!GM_getValue(GEMINI_API_KEY, null)) {
-            console.warn("TuQsAi: Gemini API Key not set. Will prompt on first use.");
-        }
 
         if (STATE === STATES.answerQuiz) {
-            // Use a slightly longer delay for dynamic content loading
-            setTimeout(handleQuizPage, 750); // 750ms delay
+            console.log("TuQSLLM: Handling quiz attempt page.");
+
+            if (isQuestionAnswerable()) {
+                if ((questionDataGlobal.textForPrompt || (questionDataGlobal.imagesData && questionDataGlobal.imagesData.length > 0)) && answer_options_data_global.length > 0) {
+                    displayStatus("<i>Getting suggestions from LLM...</i>", "info");
+                    try {
+                        const suggestions = await getLlmSuggestions(questionDataGlobal.textForPrompt, questionDataGlobal.imagesData, answer_options_data_global);
+                        if (suggestions && suggestions.length > 0) {
+                            displayStatus(`LLM suggests option(s): ${suggestions.join(', ')}`, "success");
+                            // Ensure the correct class (truefalse or multichoice) is instantiated
+                            if (window[question_type]) {
+                                const handler = new window[question_type](answer_options_data_global);
+                                handler.selectAnswers(suggestions);
+                            } else {
+                                console.error(`TuQS LLM: No handler found for question type: ${question_type}`);
+                                displayStatus(`<i>Error: No handler for question type ${question_type}</i>`, "error");
+                            }
+                        } else {
+                            displayStatus("LLM did not provide a suggestion or it was invalid.", "warning");
+                        }
+                    } catch (error) {
+                        console.error("TuQSLLM: Error getting LLM suggestions:", error);
+                        displayStatus(`<i>Error from LLM: ${error.message || error}</i>`, "error");
+                    }
+                } else {
+                    displayStatus("<i>Error: Could not extract sufficient question or answer data. Cannot contact LLM.</i>", "error");
+                    console.error("TuQSLLM: Missing question text/images or answer options for LLM.");
+                }
+            } else if (question_type === QUESTION_TYPES.ddwtos) {
+                // DDWTOS Logic
+                const ddwtosData = getDragDropTextData();
+                if (ddwtosData) {
+                    displayStatus("<i>Getting suggestions for drag & drop...</i>", "info");
+                    try {
+                        const clozeSuggestions = await getLlmClozeSuggestions(
+                            ddwtosData.questionText,
+                            ddwtosData.dropZones.map(dz => dz.id),
+                            ddwtosData.draggableOptions
+                        );
+                        
+                        const handler = new window.ddwtos(ddwtosData);
+                        await handler.displaySuggestions(clozeSuggestions); 
+                        // Status messages are now handled within displaySuggestions
+
+                    } catch (error) {
+                        console.error("TuQSLLM: Error in DDWTOS suggestion process:", error);
+                        displayStatus(`<i>Error (drag & drop): ${error.message || error}</i>`, "error");
+                    }
+                } else {
+                    displayStatus("<i>Error: Could not extract drag & drop data.</i>", "error");
+                }
+
+            } else {
+                console.log("TuQSLLM: Question type not supported or no question found on this page.");
+                // Optionally display a status if no actionable question is found
+                // displayStatus("<i>No answerable question type found on this page.</i>", "info");
+            }
         } else if (STATE === STATES.viewQuiz) {
-            console.log("TuQsAi: On quiz view page. No actions taken.");
+            console.log("TuQSLLM: On quiz view page. No actions taken for suggestions.");
+            // Potentially add features for the viewQuiz page here later
         }
     });
 
-})(); 
+})().catch(e => console.error("TuQS LLM: Critical error in main async execution:", e));
+
+// Ensure GM_setValue uses the correct constant if used elsewhere.
+// Ensure `displayStatus` function is robust or uses your existing UI logic.
+// The classes `truefalse`, `multichoice`, `ddwtos` should be defined in your script.
+// If `ddwtos` handler or its methods like `displaySuggestions` are not defined,
+// those parts will cause errors.
