@@ -42,18 +42,36 @@
     const QUESTION_TYPES = {
         multiplechoice: "multichoice",
         truefalse: "truefalse",
-        ddwtos: "ddwtos"
+        ddwtos: "ddwtos",
+        shortanswer: "shortanswer"
     };
 
     const AVAILABLE_TYPES = [
         QUESTION_TYPES.truefalse,
         QUESTION_TYPES.multiplechoice,
-        QUESTION_TYPES.ddwtos
+        QUESTION_TYPES.ddwtos,
+        QUESTION_TYPES.shortanswer
     ];
 
     // --- Helper Functions for Image Processing ---
     function getImageMimeType(url) {
-        if (typeof url !== 'string') return 'application/octet-stream';
+        if (typeof url !== 'string') return null;
+        
+        // Handle Moodle pluginfile.php URLs
+        if (url.includes('pluginfile.php')) {
+            const extension = url.split('.').pop().toLowerCase();
+            switch (extension) {
+                case 'png': return 'image/png';
+                case 'jpg':
+                case 'jpeg': return 'image/jpeg';
+                case 'gif': return 'image/gif';
+                case 'webp': return 'image/webp';
+                case 'svg': return 'image/svg+xml';
+                default: return 'image/png'; // Default to PNG for Moodle files
+            }
+        }
+        
+        // Handle regular URLs
         const extension = url.substring(url.lastIndexOf('.') + 1).toLowerCase();
         switch (extension) {
             case 'png': return 'image/png';
@@ -61,72 +79,141 @@
             case 'jpeg': return 'image/jpeg';
             case 'gif': return 'image/gif';
             case 'webp': return 'image/webp';
-            default: return 'application/octet-stream'; // Fallback
+            case 'svg': return 'image/svg+xml';
+            default: return null;
         }
+    }
+
+    // Convert SVG to PNG using canvas
+    async function convertSvgToPng(svgUrl) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            
+            img.onload = function() {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.width;
+                canvas.height = img.height;
+                
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                
+                try {
+                    const pngData = canvas.toDataURL('image/png').split(',')[1];
+                    resolve({
+                        mimeType: 'image/png',
+                        data: pngData
+                    });
+                } catch (e) {
+                    reject(new Error('Failed to convert SVG to PNG: ' + e.message));
+                }
+            };
+            
+            img.onerror = function() {
+                reject(new Error('Failed to load SVG image'));
+            };
+            
+            img.src = svgUrl;
+        });
     }
 
     async function fetchImageAsBase64(imageUrl) {
         return new Promise((resolve, reject) => {
-            if (!imageUrl) {
-                return reject(new Error('Image URL is null or empty.'));
+            // Sanitize and normalize the URL
+            let sanitizedUrl = imageUrl;
+            try {
+                // Handle relative URLs
+                if (imageUrl.startsWith('/')) {
+                    sanitizedUrl = new URL(imageUrl, window.location.origin).href;
+                }
+                // Handle Moodle pluginfile.php URLs
+                else if (imageUrl.includes('pluginfile.php')) {
+                    // Ensure the URL is absolute
+                    if (!imageUrl.startsWith('http')) {
+                        sanitizedUrl = new URL(imageUrl, window.location.origin).href;
+                    }
+                }
+                // Handle other URLs
+                else if (!imageUrl.startsWith('http')) {
+                    sanitizedUrl = new URL(imageUrl, window.location.href).href;
+                }
+            } catch (e) {
+                console.warn(`TuQS LLM: Error sanitizing URL ${imageUrl}:`, e);
+                sanitizedUrl = imageUrl; // Fallback to original URL
             }
+
+            const mimeType = getImageMimeType(sanitizedUrl);
+            
+            // Skip unsupported image types
+            if (!mimeType) {
+                console.warn(`TuQS LLM: Unsupported image type for ${sanitizedUrl}`);
+                reject(new Error(`Unsupported image type: ${sanitizedUrl}`));
+                return;
+            }
+            
+            // Handle SVG images by converting to PNG
+            if (mimeType === 'image/svg+xml') {
+                convertSvgToPng(sanitizedUrl)
+                    .then(resolve)
+                    .catch(error => {
+                        console.warn(`TuQS LLM: Failed to convert SVG to PNG for ${sanitizedUrl}:`, error.message);
+                        reject(error);
+                    });
+                return;
+            }
+
+            console.log(`TuQS LLM: Fetching image from ${sanitizedUrl} with MIME type ${mimeType}`);
+
             GM_xmlhttpRequest({
                 method: 'GET',
-                url: imageUrl,
-                responseType: 'blob',
+                url: sanitizedUrl,
+                responseType: 'arraybuffer',
+                timeout: 10000,
                 onload: function(response) {
-                    if (response.status === 200 && response.response) {
-                        const blob = response.response;
-                        const reader = new FileReader();
-                        reader.onloadend = function() {
-                            const base64data = reader.result.split(',')[1];
-                            resolve({
-                                mimeType: blob.type && blob.type !== 'application/octet-stream' ? blob.type : getImageMimeType(imageUrl),
-                                data: base64data
-                            });
-                        };
-                        reader.onerror = function(e) {
-                            console.error('FileReader error for image:', imageUrl, e);
-                            reject(new Error('FileReader error for image: ' + imageUrl));
-                        };
-                        reader.readAsDataURL(blob);
+                    if (response.status === 200) {
+                        const base64 = btoa(
+                            new Uint8Array(response.response)
+                                .reduce((data, byte) => data + String.fromCharCode(byte), '')
+                        );
+                        resolve({
+                            mimeType: mimeType,
+                            data: base64
+                        });
                     } else {
-                        console.error(`Failed to fetch image ${imageUrl}: Status ${response.status}`, response);
-                        reject(new Error(`Failed to fetch image ${imageUrl}: ${response.statusText || response.status}`));
+                        console.error(`TuQS LLM: Failed to fetch image ${sanitizedUrl}: ${response.status} ${response.statusText}`);
+                        reject(new Error(`Failed to fetch image: ${response.status} ${response.statusText}`));
                     }
                 },
                 onerror: function(error) {
-                    console.error(`GM_xmlhttpRequest error for image ${imageUrl}:`, error);
-                    reject(new Error(`GM_xmlhttpRequest error for image ${imageUrl}`));
+                    console.error(`TuQS LLM: Error fetching image ${sanitizedUrl}:`, error);
+                    reject(new Error(`Failed to fetch image: ${error.message}`));
                 },
                 ontimeout: function() {
-                    console.error(`Timeout fetching image ${imageUrl}`);
-                    reject(new Error(`Timeout fetching image ${imageUrl}`));
+                    console.error(`TuQS LLM: Timeout fetching image ${sanitizedUrl}`);
+                    reject(new Error(`Timeout fetching image ${sanitizedUrl}`));
                 }
             });
         });
     }
 
-
     // --- Functions ---
 
-    function getQuestionType() {
-        let question = $(".que");
-        if (!question.length) return null;
+    function getQuestionType(questionElement) {
+        if (!questionElement || !questionElement.length) return null;
         for (const type of Object.values(QUESTION_TYPES)) {
-            if (question.hasClass(type)) return type;
+            if (questionElement.hasClass(type)) return type;
         }
         console.warn("TuQS LLM: Unknown question type.");
         return null;
     }
 
-    function isQuestionAnswerable() {
-        return AVAILABLE_TYPES.includes(question_type);
+    function isQuestionAnswerable(questionType) {
+        return AVAILABLE_TYPES.includes(questionType);
     }
 
     // Extracts question text and fetches image data from the question body
-    async function getQuestionData() {
-        const qtextElement = $(".qtext").first();
+    async function getQuestionData(questionElement) {
+        const qtextElement = questionElement.find(".qtext").first();
         if (!qtextElement.length) return { textForPrompt: "", imagesData: [] };
 
         // For text, clone the element, remove images, then get text to avoid alt text duplication
@@ -150,15 +237,29 @@
                 }
             }
         }
-        // console.log("TuQS LLM: Extracted Question Data - Text:", textForPrompt, "Images found:", imagesData.length);
         return { textForPrompt, imagesData };
     }
 
 
-    // Extracts answer options { id, text, inputElement, imageData? }
-    async function getAnswerOptions() {
+    // Extracts answer options for short answer questions
+    async function getAnswerOptions(questionElement) {
+        const questionType = getQuestionType(questionElement);
+        
+        if (questionType === QUESTION_TYPES.shortanswer) {
+            const inputElement = questionElement.find("input[type='text']");
+            if (inputElement.length) {
+                return [{
+                    id: '1',
+                    text: 'shortanswer',
+                    inputElement: inputElement
+                }];
+            }
+            console.warn("TuQS LLM: Could not find input element for short answer question");
+            return [];
+        }
+
         const options = [];
-        const answerElements = $(".answer > div");
+        const answerElements = questionElement.find(".answer > div");
 
         if (!answerElements.length) return options;
 
@@ -203,15 +304,11 @@
                 console.warn("TuQS LLM: Could not extract input or meaningful text/image for an answer option:", $this.html());
             }
         }
-        // console.log("TuQS LLM: Extracted Options (with image data if available):", options.map(o => ({text: o.text, hasImage: !!o.imageData}));
         return options;
     }
 
     // Extracts data for drag-and-drop onto text questions (remains unchanged for now)
-    function getDragDropTextData() {
-        const questionElement = $(".que.ddwtos");
-        if (!questionElement.length) return null;
-
+    function getDragDropTextData(questionElement) {
         const questionText = questionElement.find(".qtext").text()?.trim();
         const dropZones = [];
         const draggableOptions = [];
@@ -258,7 +355,13 @@
             if (!questionTextForPrompt && (!questionImagesData || questionImagesData.length === 0)) {
                 return reject("Missing question text and images for LLM.");
             }
-            if (!optionsWithImageData || optionsWithImageData.length === 0) {
+
+            // Special handling for short answer questions
+            const isShortAnswer = optionsWithImageData.length === 1 && optionsWithImageData[0].text === 'shortanswer';
+            
+            if (isShortAnswer) {
+                // For short answer, we don't need options validation
+            } else if (!optionsWithImageData || optionsWithImageData.length === 0) {
                 return reject("Missing options for LLM.");
             }
 
@@ -274,7 +377,9 @@
             }
 
             const llmParts = [];
-            const systemInstructionText = "You are an AI assistant helping a student with a multiple-choice quiz. Images may be provided for the question or options. Provide only the number(s) of the correct answer(s) based on the text and images given. Consider all provided information.";
+            const systemInstructionText = isShortAnswer 
+                ? "You are an AI assistant helping a student with a short answer quiz question. Images may be provided. For numerical questions, provide ONLY the numerical answer without any units or explanations. For text questions, provide ONLY the exact text required. Do not include any explanations, units, or additional text."
+                : "You are an AI assistant helping a student with a multiple-choice quiz. Images may be provided for the question or options. Provide only the number(s) of the correct answer(s) based on the text and images given. Consider all provided information.";
 
             // Part 1: Question Text
             if (questionTextForPrompt) {
@@ -285,109 +390,143 @@
             if (questionImagesData && questionImagesData.length > 0) {
                 questionImagesData.forEach((imgData, idx) => {
                     if (imgData && imgData.mimeType && imgData.data) {
-                        // llmParts.push({ text: `[Context for Question Image ${idx + 1} follows]\n` });
                         llmParts.push({ inlineData: { mimeType: imgData.mimeType, data: imgData.data } });
                     }
                 });
             }
-            llmParts.push({ text: "\nAvailable Options:\n" });
 
-            // Part 3 & 4: Options text and images
-            optionsWithImageData.forEach((opt, index) => {
-                llmParts.push({ text: `${index + 1}. ${opt.text}\n` });
-                if (opt.imageData && opt.imageData.mimeType && opt.imageData.data) {
-                    // llmParts.push({ text: `[Context for Option ${index + 1} Image follows]\n` });
-                    llmParts.push({ inlineData: { mimeType: opt.imageData.mimeType, data: opt.imageData.data } });
-                }
-            });
+            if (!isShortAnswer) {
+                llmParts.push({ text: "\nAvailable Options:\n" });
 
-            llmParts.push({ text: `\nConsider the context of a university course quiz. Respond ONLY with the number(s) corresponding to the correct option(s) from the list above.\n*   If it is likely a single-choice question, provide ONLY the single best answer number.\n*   If it is clearly a multiple-choice/select-all-that-apply question, list each correct number on a new line.\n\nDo not include the option text, introductory phrases like "The correct answer is:", or any explanations. \n**IMPORTANT: Do NOT include any reasoning, chain-of-thought, or XML/HTML tags (like <think>) in your response.** Just the raw number(s).` });
+                // Part 3 & 4: Options text and images
+                optionsWithImageData.forEach((opt, index) => {
+                    llmParts.push({ text: `${index + 1}. ${opt.text}\n` });
+                    if (opt.imageData && opt.imageData.mimeType && opt.imageData.data) {
+                        llmParts.push({ inlineData: { mimeType: opt.imageData.mimeType, data: opt.imageData.data } });
+                    }
+                });
+
+                llmParts.push({ text: `\nConsider the context of a university course quiz. Respond ONLY with the number(s) corresponding to the correct option(s) from the list above.\n*   If it is likely a single-choice question, provide ONLY the single best answer number.\n*   If it is clearly a multiple-choice/select-all-that-apply question, list each correct number on a new line.\n\nDo not include the option text, introductory phrases like "The correct answer is:", or any explanations. \n**IMPORTANT: Do NOT include any reasoning, chain-of-thought, or XML/HTML tags (like <think>) in your response.** Just the raw number(s).` });
+            } else {
+                llmParts.push({ text: `\nFor this question, provide ONLY the numerical answer or exact text required. Do not include any explanations, units, or additional text. If the answer is a number, provide it as a plain number without any units or formatting.` });
+            }
 
             const apiUrl = `${GEMINI_API_BASE_URL}${llmModel}:generateContent?key=${llmApiKey}`;
+            const maxRetries = 2;
+            let retryCount = 0;
 
-            // console.log("TuQsAi: Sending multimodal prompt to Gemini. Number of parts:", llmParts.length);
-            // For brevity, log only text parts or image placeholders
-            // console.log("TuQsAi: Prompt Parts Overview:", llmParts.map(p => p.text ? {text: p.text.substring(0,100) + "..."} : {inlineData: `(${p.inlineData.mimeType})`}));
-
-
-            GM_xmlhttpRequest({
-                method: "POST",
-                url: apiUrl,
-                headers: { "Content-Type": "application/json" },
-                data: JSON.stringify({
-                    contents: [{ role: "user", parts: llmParts }],
-                    systemInstruction: { parts: [{ text: systemInstructionText }] },
-                    generationConfig: {
-                        temperature: 0.1,
-                        // maxOutputTokens: 50, // Optional
-                    }
-                }),
-                timeout: 60000, // Increased timeout for potentially larger payloads
-                onload: function (response) {
-                    try {
-                        // console.log("TuQS LLM: Raw Gemini response:", response.responseText);
-                        const responseData = JSON.parse(response.responseText);
-
-                        let rawCompletion = '';
-                        if (responseData.candidates && responseData.candidates.length > 0 &&
-                            responseData.candidates[0].content && responseData.candidates[0].content.parts &&
-                            responseData.candidates[0].content.parts.length > 0 && responseData.candidates[0].content.parts[0].text) {
-                           rawCompletion = responseData.candidates[0].content.parts[0].text;
-                        } else if (responseData.promptFeedback && responseData.promptFeedback.blockReason) {
-                            const blockReason = responseData.promptFeedback.blockReason;
-                            const safetyRatings = responseData.promptFeedback.safetyRatings || [];
-                            let blockDetails = `Block reason: ${blockReason}.`;
-                            if (safetyRatings.length > 0) {
-                                blockDetails += ` Safety ratings: ${safetyRatings.map(r => `${r.category} - ${r.probability}`).join(', ')}`;
-                            }
-                            console.error("TuQS LLM: Prompt blocked by Gemini.", blockDetails, "Full feedback:", responseData.promptFeedback);
-                            throw new Error(`LLM prompt blocked: ${blockReason}. Check console for details.`);
-                        } else {
-                             console.error("TuQS LLM: Gemini response format unexpected:", responseData);
-                             throw new Error("Gemini response format unexpected. Check API documentation or raw response.");
-                         }
-
-                        if (!rawCompletion && !(responseData.promptFeedback && responseData.promptFeedback.blockReason)) {
-                            throw new Error("LLM response format unexpected or empty completion, and not blocked.");
+            function makeRequest() {
+                GM_xmlhttpRequest({
+                    method: "POST",
+                    url: apiUrl,
+                    headers: { "Content-Type": "application/json" },
+                    data: JSON.stringify({
+                        contents: [{ role: "user", parts: llmParts }],
+                        systemInstruction: { parts: [{ text: systemInstructionText }] },
+                        generationConfig: {
+                            temperature: 0.1,
                         }
+                    }),
+                    timeout: 120000, // Increased timeout to 120 seconds
+                    onload: function (response) {
+                        try {
+                            const responseData = JSON.parse(response.responseText);
 
-                        let cleanedCompletion = rawCompletion.replace(/<think>.*?<\/think>/gs, '').trim();
-                        console.log("TuQS LLM: Cleaned completion from LLM:", cleanedCompletion); // Log the direct text from LLM
-
-                        const numOptions = optionsWithImageData.length;
-                        const finalSuggestions = cleanedCompletion.split(/\r\n|\r|\n/) // Use regex to split by any common newline
-                            .map(s => {
-                                const cleaned = s.trim().replace(/[.,;:!?]$/, '').trim();
-                                const potentialIndexNum = parseInt(cleaned, 10);
-                                if (!isNaN(potentialIndexNum) && potentialIndexNum >= 1 && potentialIndexNum <= numOptions) {
-                                    return potentialIndexNum.toString();
+                            let rawCompletion = '';
+                            if (responseData.candidates && responseData.candidates.length > 0 &&
+                                responseData.candidates[0].content && responseData.candidates[0].content.parts &&
+                                responseData.candidates[0].content.parts.length > 0 && responseData.candidates[0].content.parts[0].text) {
+                               rawCompletion = responseData.candidates[0].content.parts[0].text;
+                            } else if (responseData.promptFeedback && responseData.promptFeedback.blockReason) {
+                                const blockReason = responseData.promptFeedback.blockReason;
+                                const safetyRatings = responseData.promptFeedback.safetyRatings || [];
+                                let blockDetails = `Block reason: ${blockReason}.`;
+                                if (safetyRatings.length > 0) {
+                                    blockDetails += ` Safety ratings: ${safetyRatings.map(r => `${r.category} - ${r.probability}`).join(', ')}`;
                                 }
-                                return null;
-                            })
-                            .filter(s => s !== null);
+                                console.error("TuQS LLM: Prompt blocked by Gemini.", blockDetails, "Full feedback:", responseData.promptFeedback);
+                                throw new Error(`LLM prompt blocked: ${blockReason}. Check console for details.`);
+                            } else {
+                                 console.error("TuQS LLM: Gemini response format unexpected:", responseData);
+                                 throw new Error("Gemini response format unexpected. Check API documentation or raw response.");
+                             }
 
-                        if (finalSuggestions.length === 0 && cleanedCompletion) {
-                            console.warn("TuQS LLM: Gemini response did not yield a valid option index from:", cleanedCompletion);
+                            if (!rawCompletion && !(responseData.promptFeedback && responseData.promptFeedback.blockReason)) {
+                                throw new Error("LLM response format unexpected or empty completion, and not blocked.");
+                            }
+
+                            let cleanedCompletion = rawCompletion.replace(/<think>.*?<\/think>/gs, '').trim();
+                            console.log("TuQS LLM: Cleaned completion from LLM:", cleanedCompletion);
+
+                            if (isShortAnswer) {
+                                // For short answer, return the cleaned completion directly
+                                resolve([cleanedCompletion]);
+                            } else {
+                                const numOptions = optionsWithImageData.length;
+                                const finalSuggestions = cleanedCompletion.split(/\r\n|\r|\n/)
+                                    .map(s => {
+                                        const cleaned = s.trim().replace(/[.,;:!?]$/, '').trim();
+                                        const potentialIndexNum = parseInt(cleaned, 10);
+                                        if (!isNaN(potentialIndexNum) && potentialIndexNum >= 1 && potentialIndexNum <= numOptions) {
+                                            return potentialIndexNum.toString();
+                                        }
+                                        return null;
+                                    })
+                                    .filter(s => s !== null);
+
+                                if (finalSuggestions.length === 0 && cleanedCompletion) {
+                                    console.warn("TuQS LLM: Gemini response did not yield a valid option index from:", cleanedCompletion);
+                                }
+
+                                resolve(finalSuggestions);
+                            }
+
+                        } catch (error) {
+                            console.error("TuQS LLM: Error parsing Gemini response:", error);
+                            console.error("TuQS LLM: Raw response text for debugging:", response.responseText);
+                            
+                            // Retry logic for certain errors
+                            if (retryCount < maxRetries && (
+                                error.message.includes("timeout") || 
+                                error.message.includes("network") ||
+                                error.message.includes("INVALID_ARGUMENT")
+                            )) {
+                                retryCount++;
+                                console.log(`TuQS LLM: Retrying request (${retryCount}/${maxRetries})...`);
+                                setTimeout(makeRequest, 2000 * retryCount); // Exponential backoff
+                            } else {
+                                reject("Failed to parse Gemini response: " + error.message);
+                            }
                         }
-
-                        // console.log("TuQS LLM: Parsed suggested answer number(s):", finalSuggestions);
-                        resolve(finalSuggestions);
-
-                    } catch (error) {
-                        console.error("TuQS LLM: Error parsing Gemini response:", error);
-                        console.error("TuQS LLM: Raw response text for debugging:", response.responseText);
-                        reject("Failed to parse Gemini response: " + error.message);
+                    },
+                    onerror: function (error) {
+                        console.error("TuQS LLM: Gemini request error:", error);
+                        
+                        // Retry logic for network errors
+                        if (retryCount < maxRetries) {
+                            retryCount++;
+                            console.log(`TuQS LLM: Retrying request after error (${retryCount}/${maxRetries})...`);
+                            setTimeout(makeRequest, 2000 * retryCount); // Exponential backoff
+                        } else {
+                            reject("Gemini request failed: " + JSON.stringify(error));
+                        }
+                    },
+                    ontimeout: function () {
+                        console.error("TuQS LLM: Gemini request timed out.");
+                        
+                        // Retry logic for timeouts
+                        if (retryCount < maxRetries) {
+                            retryCount++;
+                            console.log(`TuQS LLM: Retrying request after timeout (${retryCount}/${maxRetries})...`);
+                            setTimeout(makeRequest, 2000 * retryCount); // Exponential backoff
+                        } else {
+                            reject("Gemini request timed out.");
+                        }
                     }
-                },
-                onerror: function (error) {
-                    console.error("TuQS LLM: Gemini request error:", error);
-                    reject("Gemini request failed: " + JSON.stringify(error));
-                },
-                ontimeout: function () {
-                    console.error("TuQS LLM: Gemini request timed out.");
-                    reject("Gemini request timed out.");
-                }
-            });
+                });
+            }
+
+            makeRequest();
         });
     }
 
@@ -709,36 +848,30 @@
     // --- END DDWTOS Handler ---
 
     // --- UI Functions (Placeholder - adapt to your existing UI logic) ---
-    function displayStatus(message, type = "info") {
-        let statusDiv = $('#llm-status');
-        const questionBlock = $('.que').first();
-        let contentBlock; // Declare here to check its existence later
-
-        if (questionBlock.length) {
-            contentBlock = questionBlock.find('.content').first();
-        }
+    function displayStatus(message, type = "info", questionElement) {
+        let statusDiv = questionElement.find('#llm-status');
+        const contentBlock = questionElement.find('.content').first();
 
         if (!statusDiv.length) {
             if (contentBlock && contentBlock.length) {
                 statusDiv = $('<div id="llm-status"></div>');
-                contentBlock.append(statusDiv); // Append inside the .content block
+                contentBlock.append(statusDiv);
 
                 statusDiv.css({
-                    'width': '100%', // Takes full width of the parent .content's content area
-                    'margin-top': '15px',      // Space from elements above it within .content
-                    'margin-bottom': '10px',   // Space below the status message within .content
+                    'width': '100%',
+                    'margin-top': '15px',
+                    'margin-bottom': '10px',
                     'padding': '10px',
                     'border': '1px solid #ccc',
                     'background-color': '#f0f0f0',
-                    'box-sizing': 'border-box' // Padding and border included in 100% width
+                    'box-sizing': 'border-box'
                 });
-            } else if (questionBlock.length) {
-                // Fallback: if .content not found, append to .que (less ideal for specific width)
+            } else {
                 statusDiv = $('<div id="llm-status"></div>');
-                questionBlock.append(statusDiv);
-                console.warn("TuQS LLM: '.content' div not found within '.que'. Status div appended to '.que'. Width might not match '.content' precisely.");
+                questionElement.append(statusDiv);
+                console.warn("TuQS LLM: '.content' div not found within question. Status div appended to question element.");
                 statusDiv.css({
-                    'width': '100%', // Full width of .que's content area
+                    'width': '100%',
                     'margin-top': '15px',
                     'margin-bottom': '0',
                     'padding': '10px',
@@ -746,20 +879,10 @@
                     'background-color': '#f0f0f0',
                     'box-sizing': 'border-box'
                 });
-            } else {
-                // Ultimate Fallback: append to body
-                statusDiv = $('<div id="llm-status"></div>').appendTo('body');
-                statusDiv.css({
-                    'margin-top': '15px',
-                    'padding': '10px',
-                    'border': '1px solid #ccc',
-                    'background-color': '#f0f0f0'
-                });
             }
         }
 
-        // Determine text color based on type - background and border are fixed now
-        let textColor = 'black'; // Default for info
+        let textColor = 'black';
         switch (type) {
             case "error":
                 textColor = 'red';
@@ -770,12 +893,10 @@
             case "warning":
                 textColor = 'orange';
                 break;
-            // No need for info/default case as textColor is already black
         }
 
-        // Update content with the determined text color
         statusDiv.html(`<span style="color: ${textColor};">${message}</span>`);
-        console.log(`TuQS LLM Status (${type}): ${message}`);
+        console.log(`TuQS LLM Status (${type}) for question ${questionElement.find('.qno').text()}: ${message}`);
     }
 
 
@@ -798,74 +919,106 @@
 
 
     // --- Main Script Logic ---
-    $(document).ready(async function () { // Ensure DOM is ready, though script is at end.
+    $(document).ready(async function () {
         console.log("TuQsAi Script Loaded. Version 0.5. State:", STATE);
         if (llmModel) console.log("TuQsAi: Using Model:", llmModel);
-
 
         if (STATE === STATES.answerQuiz) {
             console.log("TuQSLLM: Handling quiz attempt page.");
 
-            if (isQuestionAnswerable()) {
-                if ((questionDataGlobal.textForPrompt || (questionDataGlobal.imagesData && questionDataGlobal.imagesData.length > 0)) && answer_options_data_global.length > 0) {
-                    displayStatus("<i>Getting suggestions from LLM...</i>", "info");
+            // Process each question on the page
+            const questions = $(".que");
+            console.log(`TuQSLLM: Found ${questions.length} questions on the page.`);
+
+            for (const question of questions) {
+                const $question = $(question);
+                const questionType = getQuestionType($question);
+                
+                if (isQuestionAnswerable(questionType)) {
+                    displayStatus("<i>Extracting question and answer data...</i>", "info", $question);
                     try {
-                        const suggestions = await getLlmSuggestions(questionDataGlobal.textForPrompt, questionDataGlobal.imagesData, answer_options_data_global);
-                        if (suggestions && suggestions.length > 0) {
-                            displayStatus(`LLM suggests option(s): ${suggestions.join(', ')}`, "success");
-                            // Ensure the correct class (truefalse or multichoice) is instantiated
-                            if (window[question_type]) {
-                                const handler = new window[question_type](answer_options_data_global);
-                                handler.selectAnswers(suggestions);
-                            } else {
-                                console.error(`TuQS LLM: No handler found for question type: ${question_type}`);
-                                displayStatus(`<i>Error: No handler for question type ${question_type}</i>`, "error");
+                        const questionData = await getQuestionData($question);
+                        const answerOptions = await getAnswerOptions($question);
+
+                        if ((questionData.textForPrompt || (questionData.imagesData && questionData.imagesData.length > 0)) && answerOptions.length > 0) {
+                            displayStatus("<i>Getting suggestions from LLM...</i>", "info", $question);
+                            try {
+                                const suggestions = await getLlmSuggestions(questionData.textForPrompt, questionData.imagesData, answerOptions);
+                                if (suggestions && suggestions.length > 0) {
+                                    displayStatus(`LLM suggests option(s): ${suggestions.join(', ')}`, "success", $question);
+                                    if (window[questionType]) {
+                                        const handler = new window[questionType](answerOptions);
+                                        handler.selectAnswers(suggestions);
+                                    } else {
+                                        console.error(`TuQS LLM: No handler found for question type: ${questionType}`);
+                                        displayStatus(`<i>Error: No handler for question type ${questionType}</i>`, "error", $question);
+                                    }
+                                } else {
+                                    displayStatus("LLM did not provide a suggestion or it was invalid.", "warning", $question);
+                                }
+                            } catch (error) {
+                                console.error("TuQSLLM: Error getting LLM suggestions:", error);
+                                displayStatus(`<i>Error from LLM: ${error.message || error}</i>`, "error", $question);
                             }
                         } else {
-                            displayStatus("LLM did not provide a suggestion or it was invalid.", "warning");
+                            displayStatus("<i>Error: Could not extract sufficient question or answer data. Cannot contact LLM.</i>", "error", $question);
+                            console.error("TuQSLLM: Missing question text/images or answer options for LLM.");
                         }
-                    } catch (error) {
-                        console.error("TuQSLLM: Error getting LLM suggestions:", error);
-                        displayStatus(`<i>Error from LLM: ${error.message || error}</i>`, "error");
+                    } catch (e) {
+                        console.error("TuQSLLM: Error during data extraction:", e);
+                        displayStatus(`<i>Error extracting page data: ${e.message}</i>`, "error", $question);
+                    }
+                } else if (questionType === QUESTION_TYPES.ddwtos) {
+                    // DDWTOS Logic
+                    const ddwtosData = getDragDropTextData($question);
+                    if (ddwtosData) {
+                        displayStatus("<i>Getting suggestions for drag & drop...</i>", "info", $question);
+                        try {
+                            const clozeSuggestions = await getLlmClozeSuggestions(
+                                ddwtosData.questionText,
+                                ddwtosData.dropZones.map(dz => dz.id),
+                                ddwtosData.draggableOptions
+                            );
+                            
+                            const handler = new window.ddwtos(ddwtosData);
+                            await handler.displaySuggestions(clozeSuggestions);
+                        } catch (error) {
+                            console.error("TuQSLLM: Error in DDWTOS suggestion process:", error);
+                            displayStatus(`<i>Error (drag & drop): ${error.message || error}</i>`, "error", $question);
+                        }
+                    } else {
+                        displayStatus("<i>Error: Could not extract drag & drop data.</i>", "error", $question);
                     }
                 } else {
-                    displayStatus("<i>Error: Could not extract sufficient question or answer data. Cannot contact LLM.</i>", "error");
-                    console.error("TuQSLLM: Missing question text/images or answer options for LLM.");
+                    console.log(`TuQSLLM: Question type ${questionType} not supported or no question found.`);
                 }
-            } else if (question_type === QUESTION_TYPES.ddwtos) {
-                // DDWTOS Logic
-                const ddwtosData = getDragDropTextData();
-                if (ddwtosData) {
-                    displayStatus("<i>Getting suggestions for drag & drop...</i>", "info");
-                    try {
-                        const clozeSuggestions = await getLlmClozeSuggestions(
-                            ddwtosData.questionText,
-                            ddwtosData.dropZones.map(dz => dz.id),
-                            ddwtosData.draggableOptions
-                        );
-                        
-                        const handler = new window.ddwtos(ddwtosData);
-                        await handler.displaySuggestions(clozeSuggestions); 
-                        // Status messages are now handled within displaySuggestions
-
-                    } catch (error) {
-                        console.error("TuQSLLM: Error in DDWTOS suggestion process:", error);
-                        displayStatus(`<i>Error (drag & drop): ${error.message || error}</i>`, "error");
-                    }
-                } else {
-                    displayStatus("<i>Error: Could not extract drag & drop data.</i>", "error");
-                }
-
-            } else {
-                console.log("TuQSLLM: Question type not supported or no question found on this page.");
-                // Optionally display a status if no actionable question is found
-                // displayStatus("<i>No answerable question type found on this page.</i>", "info");
             }
         } else if (STATE === STATES.viewQuiz) {
             console.log("TuQSLLM: On quiz view page. No actions taken for suggestions.");
             // Potentially add features for the viewQuiz page here later
         }
     });
+
+    // --- Question Type Handlers ---
+    class shortanswer extends BaseQuestionHandler {
+        constructor(options) {
+            super(options);
+            // For short answer, the first option contains the input element
+            this.inputElement = options[0]?.inputElement;
+        }
+
+        selectAnswers(suggestedAnswer) {
+            if (!suggestedAnswer || !suggestedAnswer[0] || !this.inputElement) {
+                console.log("TuQS LLM: No suggestion or input element for short answer.");
+                return;
+            }
+
+            // Set the value of the input field
+            this.inputElement.val(suggestedAnswer[0]);
+            console.log(`TuQS LLM (ShortAnswer): Set answer to "${suggestedAnswer[0]}"`);
+        }
+    }
+    window.shortanswer = shortanswer; // Assign class to window
 
 })().catch(e => console.error("TuQS LLM: Critical error in main async execution:", e));
 
