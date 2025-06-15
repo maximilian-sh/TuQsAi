@@ -43,14 +43,16 @@
         multiplechoice: "multichoice",
         truefalse: "truefalse",
         ddwtos: "ddwtos",
-        shortanswer: "shortanswer"
+        shortanswer: "shortanswer",
+        numerical: "numerical"  // Add numerical type
     };
 
     const AVAILABLE_TYPES = [
         QUESTION_TYPES.truefalse,
         QUESTION_TYPES.multiplechoice,
         QUESTION_TYPES.ddwtos,
-        QUESTION_TYPES.shortanswer
+        QUESTION_TYPES.shortanswer,
+        QUESTION_TYPES.numerical  // Add numerical type
     ];
 
     // --- Helper Functions for Image Processing ---
@@ -245,16 +247,16 @@
     async function getAnswerOptions(questionElement) {
         const questionType = getQuestionType(questionElement);
         
-        if (questionType === QUESTION_TYPES.shortanswer) {
+        if (questionType === QUESTION_TYPES.shortanswer || questionType === QUESTION_TYPES.numerical) {
             const inputElement = questionElement.find("input[type='text']");
             if (inputElement.length) {
                 return [{
                     id: '1',
-                    text: 'shortanswer',
+                    text: questionType,
                     inputElement: inputElement
                 }];
             }
-            console.warn("TuQS LLM: Could not find input element for short answer question");
+            console.warn(`TuQS LLM: Could not find input element for ${questionType} question`);
             return [];
         }
 
@@ -476,9 +478,11 @@
 
                                 if (finalSuggestions.length === 0 && cleanedCompletion) {
                                     console.warn("TuQS LLM: Gemini response did not yield a valid option index from:", cleanedCompletion);
+                                    // Instead of just warning, return the raw response as a suggestion
+                                    resolve([cleanedCompletion]);
+                                } else {
+                                    resolve(finalSuggestions);
                                 }
-
-                                resolve(finalSuggestions);
                             }
 
                         } catch (error) {
@@ -883,6 +887,8 @@
         }
 
         let textColor = 'black';
+        let displayMessage = message;
+
         switch (type) {
             case "error":
                 textColor = 'red';
@@ -895,7 +901,13 @@
                 break;
         }
 
-        statusDiv.html(`<span style="color: ${textColor};">${message}</span>`);
+        // If the message contains a raw LLM response, format it nicely
+        if (message.includes("LLM suggests option(s):") && message.includes("\n")) {
+            const parts = message.split("LLM suggests option(s):");
+            displayMessage = `${parts[0]}LLM suggests option(s):<br><pre style="margin: 5px 0; padding: 5px; background: #f8f8f8; border: 1px solid #ddd; border-radius: 3px;">${parts[1].trim()}</pre>`;
+        }
+
+        statusDiv.html(`<span style="color: ${textColor};">${displayMessage}</span>`);
         console.log(`TuQS LLM Status (${type}) for question ${questionElement.find('.qno').text()}: ${message}`);
     }
 
@@ -1019,6 +1031,36 @@
         }
     }
     window.shortanswer = shortanswer; // Assign class to window
+
+    // Add numerical question handler
+    class numerical extends BaseQuestionHandler {
+        constructor(options) {
+            super(options);
+            // For numerical, the first option contains the input element
+            this.inputElement = options[0]?.inputElement;
+        }
+
+        selectAnswers(suggestedAnswer) {
+            if (!suggestedAnswer || !suggestedAnswer[0] || !this.inputElement) {
+                console.log("TuQS LLM: No suggestion or input element for numerical answer.");
+                return;
+            }
+
+            // Clean the answer to ensure it's a valid number
+            let answer = suggestedAnswer[0].trim();
+            
+            // Remove any units or explanatory text
+            answer = answer.replace(/[^0-9.,-]/g, '');
+            
+            // Handle decimal points (both . and ,)
+            answer = answer.replace(',', '.');
+            
+            // Set the value of the input field
+            this.inputElement.val(answer);
+            console.log(`TuQS LLM (Numerical): Set answer to "${answer}"`);
+        }
+    }
+    window.numerical = numerical; // Assign class to window
 
 })().catch(e => console.error("TuQS LLM: Critical error in main async execution:", e));
 
