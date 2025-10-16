@@ -1,13 +1,17 @@
 // ==UserScript==
 // @name         TuQsAi
-// @version      0.5
-// @description  Solve Moodle (Tuwel) quizzes with ai.
+// @version      1.0
+// @description  Solve Moodle quizzes with AI (originally for TUWEL, supports other Moodle instances).
 // @author       maximilian
 // @copyright    2025 maximilian, Adapted from Jakob Kinne's script
 // @require      http://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js
 // @require      https://raw.githubusercontent.com/blueimp/JavaScript-MD5/refs/heads/master/js/md5.min.js
 // @match        https://tuwel.tuwien.ac.at/mod/quiz/view.php*
 // @match        https://tuwel.tuwien.ac.at/mod/quiz/attempt.php*
+// @match        https://*/mod/quiz/view.php*
+// @match        https://*/mod/quiz/attempt.php*
+// @match        http://*/mod/quiz/view.php*
+// @match        http://*/mod/quiz/attempt.php*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=tuwel.tuwien.ac.at
 // @homepageURL  https://github.com/maximilian-sh/TuQsAi
 // @grant        GM_xmlhttpRequest
@@ -23,7 +27,8 @@
     // --- Configuration Keys (for GM_getValue/GM_setValue) ---
     const CONFIG_API_KEY = "gemini_api_key"; // Standardized key
     const CONFIG_MODEL = "gemini_model"; // Standardized key
-    const DEFAULT_MODEL = "gemini-2.5-flash-preview-09-2025"; // Model supporting multimodal
+    const DEFAULT_MODEL = "gemini-2.5-flash"; // Model supporting multimodal
+    // Alternative models: gemini-2.5-flash-lite (cheaper), gemini-2.0-flash (newer), gemini-1.5-flash (stable)
     const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/";
 
     // --- Get Configuration ---
@@ -39,8 +44,14 @@
     const HREF = new URL(window.location.toString());
     const STATE = HREF.pathname.includes("view.php") ? STATES.viewQuiz : STATES.answerQuiz;
 
+    // Detect Moodle instance
+    const isTUWEL = HREF.hostname.includes("tuwel.tuwien.ac.at");
+    const isMoodle = HREF.pathname.includes("/mod/quiz/");
+    const MOODLE_INSTANCE = isTUWEL ? "TUWEL" : isMoodle ? "Moodle" : "Unknown";
+
     const QUESTION_TYPES = {
         multiplechoice: "multichoice",
+        multichoiceset: "multichoiceset", // Add multichoiceset type
         truefalse: "truefalse",
         ddwtos: "ddwtos",
         shortanswer: "shortanswer",
@@ -50,6 +61,7 @@
     const AVAILABLE_TYPES = [
         QUESTION_TYPES.truefalse,
         QUESTION_TYPES.multiplechoice,
+        QUESTION_TYPES.multichoiceset, // Add multichoiceset type
         QUESTION_TYPES.ddwtos,
         QUESTION_TYPES.shortanswer,
         QUESTION_TYPES.numerical, // Add numerical type
@@ -453,6 +465,30 @@
                         try {
                             const responseData = JSON.parse(response.responseText);
 
+                            // Handle API errors (quota limits, model overload, etc.)
+                            if (responseData.error) {
+                                const errorCode = responseData.error.code;
+                                const errorMessage = responseData.error.message;
+
+                                if (errorCode === 429) {
+                                    // Rate limit / quota exceeded
+                                    const retryDelay =
+                                        responseData.error.details?.find((d) => d["@type"]?.includes("RetryInfo"))?.retryDelay || "8s";
+                                    console.warn(`TuQS LLM: Rate limit exceeded. Retry in ${retryDelay}. Message: ${errorMessage}`);
+                                    throw new Error(
+                                        `Rate limit exceeded. Please wait ${retryDelay} before trying again. Consider upgrading to paid tier for higher limits.`
+                                    );
+                                } else if (errorCode === 503) {
+                                    // Model overloaded
+                                    console.warn(`TuQS LLM: Model overloaded. Message: ${errorMessage}`);
+                                    throw new Error(`Model is currently overloaded. Please try again in a few minutes.`);
+                                } else {
+                                    // Other API errors
+                                    console.error(`TuQS LLM: API Error ${errorCode}: ${errorMessage}`);
+                                    throw new Error(`API Error ${errorCode}: ${errorMessage}`);
+                                }
+                            }
+
                             let rawCompletion = "";
                             if (
                                 responseData.candidates &&
@@ -847,6 +883,7 @@
         }
     }
     window.multichoice = multichoice; // Assign class to window object
+    window.multichoiceset = multichoice; // Use same handler for multichoiceset
 
     // --- NEW Handler for Drag-Drop Onto Text ---
     class ddwtos {
@@ -858,215 +895,224 @@
         }
 
         async displaySuggestions(suggestions) {
-            // Takes suggestions as argument
+            // Takes suggestions as argument - UI removed, runs silently
             if (!suggestions || Object.keys(suggestions).length === 0) {
-                displayStatus("<i>LLM did not provide valid suggestions for placeholders or the response was empty.</i>", "warning");
+                console.log("TuQS LLM: No valid suggestions for drag & drop");
                 return;
             }
-
-            let suggestionsHtml = '<i>LLM Suggestions (Drag & Drop):</i><ul style="margin: 0; padding-left: 20px; font-size: 0.9em;">';
-            let suggestionsAppliedCount = 0;
 
             this.dropZones.forEach((zone) => {
                 const suggestedText = suggestions[zone.id];
                 if (suggestedText) {
-                    suggestionsAppliedCount++;
-                    suggestionsHtml += `<li>Placeholder ${zone.id}: <b>${suggestedText}</b></li>`;
-
-                    // Remove any pre-existing hint for this zone to avoid duplicates
-                    zone.element.next(".llm-suggestion-hint").remove();
-
-                    const hint = $('<div class="llm-suggestion-hint"></div>')
-                        .css({
-                            fontSize: "0.8em",
-                            color: "#006400", // Dark green
-                            border: "1px dashed #006400",
-                            padding: "1px 3px",
-                            marginTop: "2px",
-                            display: "inline-block",
-                            marginLeft: "5px", // Add some space
-                        })
-                        .html(`Suggest: <b>${suggestedText}</b>`);
-                    zone.element.after(hint); // Place the hint after the drop zone span
+                    console.log(`TuQS LLM: Drag & drop suggestion for placeholder ${zone.id}: ${suggestedText}`);
                 }
             });
-            suggestionsHtml += "</ul>";
-
-            if (suggestionsAppliedCount > 0) {
-                displayStatus(suggestionsHtml, "success");
-            } else {
-                displayStatus("<i>LLM provided suggestions, but none matched the current placeholders.</i>", "warning");
-            }
         }
     }
     window.ddwtos = ddwtos; // Assign class to window object
     // --- END DDWTOS Handler ---
 
-    // --- UI Functions (Placeholder - adapt to your existing UI logic) ---
-    function displayStatus(message, type = "info", questionElement) {
-        let statusDiv = questionElement.find("#llm-status");
-        const contentBlock = questionElement.find(".content").first();
-
-        if (!statusDiv.length) {
-            if (contentBlock && contentBlock.length) {
-                statusDiv = $('<div id="llm-status"></div>');
-                contentBlock.append(statusDiv);
-
-                statusDiv.css({
-                    width: "100%",
-                    "margin-top": "15px",
-                    "margin-bottom": "10px",
-                    padding: "10px",
-                    border: "1px solid #ccc",
-                    "background-color": "#f0f0f0",
-                    "box-sizing": "border-box",
-                });
-            } else {
-                statusDiv = $('<div id="llm-status"></div>');
-                questionElement.append(statusDiv);
-                console.warn("TuQS LLM: '.content' div not found within question. Status div appended to question element.");
-                statusDiv.css({
-                    width: "100%",
-                    "margin-top": "15px",
-                    "margin-bottom": "0",
-                    padding: "10px",
-                    border: "1px solid #ccc",
-                    "background-color": "#f0f0f0",
-                    "box-sizing": "border-box",
-                });
-            }
-        }
-
-        let textColor = "black";
-        let displayMessage = message;
-
-        switch (type) {
-            case "error":
-                textColor = "red";
-                break;
-            case "success":
-                textColor = "green";
-                break;
-            case "warning":
-                textColor = "orange";
-                break;
-        }
-
-        // If the message contains a raw LLM response, format it nicely
-        if (message.includes("LLM suggests option(s):") && message.includes("\n")) {
-            const parts = message.split("LLM suggests option(s):");
-            displayMessage = `${
-                parts[0]
-            }LLM suggests option(s):<br><pre style="margin: 5px 0; padding: 5px; background: #f8f8f8; border: 1px solid #ddd; border-radius: 3px;">${parts[1].trim()}</pre>`;
-        }
-
-        statusDiv.html(`<span style="color: ${textColor};">${displayMessage}</span>`);
-        console.log(`TuQS LLM Status (${type}) for question ${questionElement.find(".qno").text()}: ${message}`);
-    }
+    // --- UI Functions removed - script runs silently ---
 
     // --- Global Variables Initialization (within async function) ---
     let question_type = getQuestionType();
     let questionDataGlobal = { textForPrompt: "", imagesData: [] };
     let answer_options_data_global = [];
+    let isProcessing = false; // Track if we're currently processing questions
 
-    if (STATE === STATES.answerQuiz && isQuestionAnswerable()) {
-        displayStatus("<i>Extracting question and answer data...</i>", "info");
-        try {
-            questionDataGlobal = await getQuestionData();
-            answer_options_data_global = await getAnswerOptions();
-            // console.log("TuQS LLM: Successfully fetched question and answer data.");
-        } catch (e) {
-            console.error("TuQS LLM: Error during initial data extraction:", e);
-            displayStatus(`<i>Error extracting page data: ${e.message}</i>`, "error");
+    // Manual processing only - no auto-initialization
+
+    // --- Question Processing Functions ---
+    async function processQuestion(questionElement, questionIndex) {
+        const $question = $(questionElement);
+        const questionType = getQuestionType($question);
+
+        if (isQuestionAnswerable(questionType)) {
+            console.log(`TuQS LLM: Processing question ${questionIndex + 1} (${questionType})`);
+            try {
+                const questionData = await getQuestionData($question);
+                const answerOptions = await getAnswerOptions($question);
+
+                if (
+                    (questionData.textForPrompt || (questionData.imagesData && questionData.imagesData.length > 0)) &&
+                    answerOptions.length > 0
+                ) {
+                    console.log(`TuQS LLM: Getting suggestions for question ${questionIndex + 1}...`);
+                    try {
+                        const suggestions = await getLlmSuggestions(questionData.textForPrompt, questionData.imagesData, answerOptions);
+                        if (suggestions && suggestions.length > 0) {
+                            console.log(`TuQS LLM: Question ${questionIndex + 1} - LLM suggests option(s): ${suggestions.join(", ")}`);
+                            if (window[questionType]) {
+                                const handler = new window[questionType](answerOptions);
+                                handler.selectAnswers(suggestions);
+                                return true; // Successfully processed
+                            } else {
+                                console.error(`TuQS LLM: No handler found for question type: ${questionType}`);
+                            }
+                        } else {
+                            console.log(`TuQS LLM: Question ${questionIndex + 1} - No valid suggestions received`);
+                        }
+                    } catch (error) {
+                        console.error(`TuQSLLM: Error getting LLM suggestions for question ${questionIndex + 1}:`, error);
+                    }
+                } else {
+                    console.error(`TuQSLLM: Question ${questionIndex + 1} - Missing question text/images or answer options for LLM.`);
+                }
+            } catch (e) {
+                console.error(`TuQSLLM: Error during data extraction for question ${questionIndex + 1}:`, e);
+            }
+        } else if (questionType === QUESTION_TYPES.ddwtos) {
+            // DDWTOS Logic
+            console.log(`TuQS LLM: Processing drag & drop question ${questionIndex + 1}`);
+            const ddwtosData = getDragDropTextData($question);
+            if (ddwtosData) {
+                console.log(`TuQS LLM: Getting suggestions for drag & drop question ${questionIndex + 1}...`);
+                try {
+                    const clozeSuggestions = await getLlmClozeSuggestions(
+                        ddwtosData.questionText,
+                        ddwtosData.dropZones.map((dz) => dz.id),
+                        ddwtosData.draggableOptions
+                    );
+
+                    const handler = new window.ddwtos(ddwtosData);
+                    await handler.displaySuggestions(clozeSuggestions);
+                    return true; // Successfully processed
+                } catch (error) {
+                    console.error(`TuQSLLM: Error in DDWTOS suggestion process for question ${questionIndex + 1}:`, error);
+                }
+            } else {
+                console.error(`TuQSLLM: Question ${questionIndex + 1} - Could not extract drag & drop data.`);
+            }
+        } else {
+            console.log(`TuQSLLM: Question type ${questionType} not supported or no question found.`);
+        }
+        return false; // Not processed or failed
+    }
+
+    function isQuestionAnswered(questionElement) {
+        const $question = $(questionElement);
+        const questionType = getQuestionType($question);
+
+        if (questionType === QUESTION_TYPES.shortanswer || questionType === QUESTION_TYPES.numerical) {
+            const input = $question.find("input[type='text']");
+            return input.length > 0 && input.val().trim() !== "";
+        } else if (questionType === QUESTION_TYPES.ddwtos) {
+            // For drag & drop, check if any drop zones have content
+            return $question.find("span.drop.active[class*='place']").length > 0;
+        } else {
+            // For multiple choice, check if any option is selected
+            return $question.find("input[type='radio']:checked, input[type='checkbox']:checked").length > 0;
+        }
+    }
+
+    async function solveNextQuestion() {
+        const questions = $(".que");
+        for (let i = 0; i < questions.length; i++) {
+            if (!isQuestionAnswered(questions[i])) {
+                console.log(`TuQS LLM: Solving next unsolved question (${i + 1})...`);
+                await processQuestion(questions[i], i);
+                return;
+            }
+        }
+        console.log("TuQS LLM: No unsolved questions found.");
+    }
+
+    async function solveAllQuestions() {
+        const questions = $(".que");
+        console.log(`TuQS LLM: Solving all ${questions.length} questions...`);
+        isProcessing = true;
+
+        for (let i = 0; i < questions.length; i++) {
+            // Check if processing was stopped
+            if (!isProcessing) {
+                console.log("TuQS LLM: Processing stopped by user.");
+                return;
+            }
+
+            if (!isQuestionAnswered(questions[i])) {
+                console.log(`TuQS LLM: Processing question ${i + 1}...`);
+                await processQuestion(questions[i], i);
+
+                // Add delay between questions to avoid rate limiting (except for last question)
+                if (i < questions.length - 1 && isProcessing) {
+                    console.log(`TuQSLLM: Waiting 2 seconds before processing next question...`);
+                    await new Promise((resolve) => setTimeout(resolve, 2000));
+                }
+            } else {
+                console.log(`TuQS LLM: Question ${i + 1} already answered, skipping.`);
+            }
+        }
+        isProcessing = false;
+        console.log("TuQS LLM: Finished processing all questions.");
+    }
+
+    function stopProcessing() {
+        if (isProcessing) {
+            isProcessing = false;
+            console.log("TuQS LLM: Stopping processing...");
+        } else {
+            console.log("TuQS LLM: No processing currently active.");
         }
     }
 
     // --- Main Script Logic ---
     $(document).ready(async function () {
-        console.log("TuQsAi Script Loaded. Version 0.5. State:", STATE);
+        console.log(`TuQsAi Script Loaded. Version 1.0. State: ${STATE}, Instance: ${MOODLE_INSTANCE}`);
         if (llmModel) console.log("TuQsAi: Using Model:", llmModel);
 
         if (STATE === STATES.answerQuiz) {
             console.log("TuQSLLM: Handling quiz attempt page.");
 
-            // Process each question on the page
+            // Show compatibility info for non-TUWEL instances
+            if (!isTUWEL && isMoodle) {
+                console.log("TuQsAi: Running on generic Moodle instance. Compatibility not guaranteed.");
+                console.log("TuQsAi: Originally designed for TUWEL. If issues occur, please report them.");
+            }
+
+            console.log("TuQS LLM: Keyboard shortcuts available:");
+            console.log("  - Press 'S': Solve next unsolved question");
+            console.log("  - Press 'Q': Solve all remaining questions (or stop if processing)");
+            console.log("  - Press 'Escape': Stop current processing");
+
+            // Add keyboard event listeners
+            $(document).keydown(function (e) {
+                // Check for Escape key - always works to stop processing
+                if (e.keyCode === 27) {
+                    // Escape key
+                    e.preventDefault();
+                    console.log("TuQS LLM: Stop processing shortcut triggered (Escape key)");
+                    stopProcessing();
+                    return;
+                }
+
+                // Only trigger other shortcuts if not in an input field
+                if (e.target.tagName !== "INPUT" && e.target.tagName !== "TEXTAREA" && !e.target.isContentEditable) {
+                    // Check for 'S' key - Solve next question
+                    if (e.keyCode === 83) {
+                        // S key
+                        e.preventDefault();
+                        console.log("TuQS LLM: Next question shortcut triggered (S key)");
+                        solveNextQuestion();
+                    }
+                    // Check for 'Q' key - Solve all questions or stop if processing
+                    else if (e.keyCode === 81) {
+                        // Q key
+                        e.preventDefault();
+                        if (isProcessing) {
+                            console.log("TuQS LLM: Stop processing shortcut triggered (Q key)");
+                            stopProcessing();
+                        } else {
+                            console.log("TuQS LLM: Solve all questions shortcut triggered (Q key)");
+                            solveAllQuestions();
+                        }
+                    }
+                }
+            });
+
+            // Manual processing only - no auto-processing on page load
             const questions = $(".que");
             console.log(`TuQSLLM: Found ${questions.length} questions on the page.`);
-
-            for (const question of questions) {
-                const $question = $(question);
-                const questionType = getQuestionType($question);
-
-                if (isQuestionAnswerable(questionType)) {
-                    displayStatus("<i>Extracting question and answer data...</i>", "info", $question);
-                    try {
-                        const questionData = await getQuestionData($question);
-                        const answerOptions = await getAnswerOptions($question);
-
-                        if (
-                            (questionData.textForPrompt || (questionData.imagesData && questionData.imagesData.length > 0)) &&
-                            answerOptions.length > 0
-                        ) {
-                            displayStatus("<i>Getting suggestions from LLM...</i>", "info", $question);
-                            try {
-                                const suggestions = await getLlmSuggestions(
-                                    questionData.textForPrompt,
-                                    questionData.imagesData,
-                                    answerOptions
-                                );
-                                if (suggestions && suggestions.length > 0) {
-                                    displayStatus(`LLM suggests option(s): ${suggestions.join(", ")}`, "success", $question);
-                                    if (window[questionType]) {
-                                        const handler = new window[questionType](answerOptions);
-                                        handler.selectAnswers(suggestions);
-                                    } else {
-                                        console.error(`TuQS LLM: No handler found for question type: ${questionType}`);
-                                        displayStatus(`<i>Error: No handler for question type ${questionType}</i>`, "error", $question);
-                                    }
-                                } else {
-                                    displayStatus("LLM did not provide a suggestion or it was invalid.", "warning", $question);
-                                }
-                            } catch (error) {
-                                console.error("TuQSLLM: Error getting LLM suggestions:", error);
-                                displayStatus(`<i>Error from LLM: ${error.message || error}</i>`, "error", $question);
-                            }
-                        } else {
-                            displayStatus(
-                                "<i>Error: Could not extract sufficient question or answer data. Cannot contact LLM.</i>",
-                                "error",
-                                $question
-                            );
-                            console.error("TuQSLLM: Missing question text/images or answer options for LLM.");
-                        }
-                    } catch (e) {
-                        console.error("TuQSLLM: Error during data extraction:", e);
-                        displayStatus(`<i>Error extracting page data: ${e.message}</i>`, "error", $question);
-                    }
-                } else if (questionType === QUESTION_TYPES.ddwtos) {
-                    // DDWTOS Logic
-                    const ddwtosData = getDragDropTextData($question);
-                    if (ddwtosData) {
-                        displayStatus("<i>Getting suggestions for drag & drop...</i>", "info", $question);
-                        try {
-                            const clozeSuggestions = await getLlmClozeSuggestions(
-                                ddwtosData.questionText,
-                                ddwtosData.dropZones.map((dz) => dz.id),
-                                ddwtosData.draggableOptions
-                            );
-
-                            const handler = new window.ddwtos(ddwtosData);
-                            await handler.displaySuggestions(clozeSuggestions);
-                        } catch (error) {
-                            console.error("TuQSLLM: Error in DDWTOS suggestion process:", error);
-                            displayStatus(`<i>Error (drag & drop): ${error.message || error}</i>`, "error", $question);
-                        }
-                    } else {
-                        displayStatus("<i>Error: Could not extract drag & drop data.</i>", "error", $question);
-                    }
-                } else {
-                    console.log(`TuQSLLM: Question type ${questionType} not supported or no question found.`);
-                }
-            }
+            console.log("TuQS LLM: Ready for manual control. Press 'S' for next question or 'Q' for all questions.");
         } else if (STATE === STATES.viewQuiz) {
             console.log("TuQSLLM: On quiz view page. No actions taken for suggestions.");
             // Potentially add features for the viewQuiz page here later
@@ -1125,8 +1171,5 @@
     window.numerical = numerical; // Assign class to window
 })().catch((e) => console.error("TuQS LLM: Critical error in main async execution:", e));
 
-// Ensure GM_setValue uses the correct constant if used elsewhere.
-// Ensure `displayStatus` function is robust or uses your existing UI logic.
-// The classes `truefalse`, `multichoice`, `ddwtos` should be defined in your script.
-// If `ddwtos` handler or its methods like `displaySuggestions` are not defined,
-// those parts will cause errors.
+// Script runs silently without UI elements
+// All status messages are logged to console only
