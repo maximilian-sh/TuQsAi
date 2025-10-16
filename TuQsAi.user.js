@@ -28,12 +28,17 @@
     const CONFIG_API_KEY = "gemini_api_key"; // Standardized key
     const CONFIG_MODEL = "gemini_model"; // Standardized key
     const DEFAULT_MODEL = "gemini-2.5-flash"; // Model supporting multimodal
-    // Alternative models: gemini-2.5-flash-lite (cheaper), gemini-2.0-flash (newer), gemini-1.5-flash (stable)
     const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/";
 
     // --- Get Configuration ---
     let llmApiKey = GM_getValue(CONFIG_API_KEY, null);
-    let llmModel = GM_getValue(CONFIG_MODEL, DEFAULT_MODEL);
+    let llmModel = GM_getValue(CONFIG_MODEL, null);
+
+    // If no model in storage, use default and save it
+    if (!llmModel) {
+        llmModel = DEFAULT_MODEL;
+        GM_setValue(CONFIG_MODEL, DEFAULT_MODEL);
+    }
 
     // --- Constants ---
     const STATES = {
@@ -627,9 +632,9 @@
                     }
                 }
             }
-            // Ensure llmModel is available
+            // Ensure llmModel is available (should always be set by now)
             if (!llmModel) {
-                llmModel = GM_getValue(CONFIG_MODEL, DEFAULT_MODEL);
+                llmModel = GM_getValue(CONFIG_MODEL, null) || DEFAULT_MODEL;
             }
 
             const optionsList = draggableOptions.map((opt) => `- "${opt}"`).join("\\n");
