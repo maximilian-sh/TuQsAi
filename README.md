@@ -13,6 +13,7 @@ AI-powered Moodle quiz assistant. Works on TUWEL and other Moodle instances.
 
 -   **`S`** - Solve next question
 -   **`Q`** - Solve all questions (press again to stop)
+-   **`R`** - Redo last processed question
 -   **`Escape`** - Stop processing
 
 ## Features
@@ -22,6 +23,7 @@ AI-powered Moodle quiz assistant. Works on TUWEL and other Moodle instances.
 -   Rate limiting
 -   Silent operation (no UI clutter)
 -   Manual control only
+-   Redo functionality - reapply last question's solution
 
 ## Advanced: Change AI Model
 

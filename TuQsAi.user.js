@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         TuQsAi
-// @version      1.0
+// @version      1.1
 // @description  Solve Moodle quizzes with AI (originally for TUWEL, supports other Moodle instances).
 // @author       maximilian
 // @copyright    2025 maximilian, Adapted from Jakob Kinne's script
@@ -925,6 +925,7 @@
     let questionDataGlobal = { textForPrompt: "", imagesData: [] };
     let answer_options_data_global = [];
     let isProcessing = false; // Track if we're currently processing questions
+    let lastProcessedQuestionIndex = null; // Track last processed question index for redo functionality
 
     // Manual processing only - no auto-initialization
 
@@ -951,6 +952,10 @@
                             if (window[questionType]) {
                                 const handler = new window[questionType](answerOptions);
                                 handler.selectAnswers(suggestions);
+
+                                // Store last processed question index for redo functionality
+                                lastProcessedQuestionIndex = questionIndex;
+
                                 return true; // Successfully processed
                             } else {
                                 console.error(`TuQS LLM: No handler found for question type: ${questionType}`);
@@ -982,6 +987,10 @@
 
                     const handler = new window.ddwtos(ddwtosData);
                     await handler.displaySuggestions(clozeSuggestions);
+
+                    // Store last processed question index for redo functionality
+                    lastProcessedQuestionIndex = questionIndex;
+
                     return true; // Successfully processed
                 } catch (error) {
                     console.error(`TuQSLLM: Error in DDWTOS suggestion process for question ${questionIndex + 1}:`, error);
@@ -1061,6 +1070,45 @@
         }
     }
 
+    async function redoLastQuestion() {
+        if (lastProcessedQuestionIndex === null) {
+            console.log("TuQS LLM: No previous question to redo.");
+            return;
+        }
+
+        const questions = $(".que");
+        if (lastProcessedQuestionIndex >= questions.length) {
+            console.log("TuQS LLM: Last processed question index is invalid.");
+            return;
+        }
+
+        console.log(`TuQS LLM: Redoing last processed question (${lastProcessedQuestionIndex + 1}) with full AI processing...`);
+
+        try {
+            // Clear any existing answers first
+            const questionElement = questions[lastProcessedQuestionIndex];
+            const $question = $(questionElement);
+            const questionType = getQuestionType($question);
+
+            // Clear existing answers
+            if (questionType === QUESTION_TYPES.shortanswer || questionType === QUESTION_TYPES.numerical) {
+                $question.find("input[type='text']").val("");
+            } else if (questionType === QUESTION_TYPES.ddwtos) {
+                // For drag & drop, we can't easily clear, so just proceed
+                console.log("TuQS LLM: Note - Drag & drop questions cannot be cleared, proceeding with redo...");
+            } else {
+                // For multiple choice, uncheck all options
+                $question.find("input[type='radio'], input[type='checkbox']").prop("checked", false);
+            }
+
+            // Now fully reprocess the question with AI
+            await processQuestion(questionElement, lastProcessedQuestionIndex);
+            console.log("TuQS LLM: Redo completed with full AI processing.");
+        } catch (error) {
+            console.error("TuQS LLM: Error during redo:", error);
+        }
+    }
+
     // --- Main Script Logic ---
     $(document).ready(async function () {
         console.log(`TuQsAi Script Loaded. Version 1.0. State: ${STATE}, Instance: ${MOODLE_INSTANCE}`);
@@ -1078,6 +1126,7 @@
             console.log("TuQS LLM: Keyboard shortcuts available:");
             console.log("  - Press 'S': Solve next unsolved question");
             console.log("  - Press 'Q': Solve all remaining questions (or stop if processing)");
+            console.log("  - Press 'R': Redo last processed question");
             console.log("  - Press 'Escape': Stop current processing");
 
             // Add keyboard event listeners
@@ -1112,13 +1161,22 @@
                             solveAllQuestions();
                         }
                     }
+                    // Check for 'R' key - Redo last processed question
+                    else if (e.keyCode === 82) {
+                        // R key
+                        e.preventDefault();
+                        console.log("TuQS LLM: Redo last question shortcut triggered (R key)");
+                        redoLastQuestion();
+                    }
                 }
             });
 
             // Manual processing only - no auto-processing on page load
             const questions = $(".que");
             console.log(`TuQSLLM: Found ${questions.length} questions on the page.`);
-            console.log("TuQS LLM: Ready for manual control. Press 'S' for next question or 'Q' for all questions.");
+            console.log(
+                "TuQS LLM: Ready for manual control. Press 'S' for next question, 'Q' for all questions, or 'R' to redo last question."
+            );
         } else if (STATE === STATES.viewQuiz) {
             console.log("TuQSLLM: On quiz view page. No actions taken for suggestions.");
             // Potentially add features for the viewQuiz page here later
