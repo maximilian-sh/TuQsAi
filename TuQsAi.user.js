@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         TuQsAi
-// @version      1.3
+// @version      1.3.1
 // @description  Solve Moodle quizzes with AI (originally for TUWEL, supports other Moodle instances).
 // @author       maximilian
 // @copyright    2025 maximilian, Adapted from Jakob Kinne's script
@@ -784,14 +784,23 @@
                 if (!input || !input.length) return;
 
                 const currentIdentifier = (index + 1).toString();
+                const inputValue = input.attr("value");
 
                 const isMatch = effectiveTargetIdentifiers.includes(currentIdentifier);
 
                 if (isMatch) {
                     input.prop("checked", true);
+                    input.trigger("change");
                     selectedOptions.push(currentIdentifier);
+                    console.log(
+                        `TuQS LLM (MultiChoice): Selected option #${currentIdentifier} (value="${inputValue}", text="${option.text.substring(
+                            0,
+                            50
+                        )}...")`
+                    );
                 } else if (isRadio) {
                     input.prop("checked", false);
+                    input.trigger("change");
                 }
             });
 
@@ -1035,7 +1044,13 @@
         } else if (questionType === QUESTION_TYPES.ddwtos) {
             return $question.find("span.drop.active[class*='place']").length > 0;
         } else {
-            return $question.find("input[type='radio']:checked, input[type='checkbox']:checked").length > 0;
+            const checkedInputs = $question.find("input[type='radio']:checked, input[type='checkbox']:checked");
+            const hasValidAnswer =
+                checkedInputs.filter(function () {
+                    const value = $(this).attr("value");
+                    return value !== "-1" && value !== undefined && value !== null;
+                }).length > 0;
+            return hasValidAnswer;
         }
     }
 
