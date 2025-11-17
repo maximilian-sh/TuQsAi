@@ -14,6 +14,7 @@
 // @match        http://*/mod/quiz/attempt.php*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=tuwel.tuwien.ac.at
 // @homepageURL  https://github.com/maximilian-sh/TuQsAi
+// @downloadURL  https://raw.githubusercontent.com/maximilian-sh/TuQsAi/main/TuQsAi.user.js
 // @updateURL    https://raw.githubusercontent.com/maximilian-sh/TuQsAi/main/TuQsAi.user.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
