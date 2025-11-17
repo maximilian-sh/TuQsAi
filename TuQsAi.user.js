@@ -1,17 +1,16 @@
 // ==UserScript==
 // @name         TuQsAi
-// @version      1.2
+// @version      1.3
 // @description  Solve Moodle quizzes with AI (originally for TUWEL, supports other Moodle instances).
 // @author       maximilian
 // @copyright    2025 maximilian, Adapted from Jakob Kinne's script
 // @require      http://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js
 // @require      https://raw.githubusercontent.com/blueimp/JavaScript-MD5/refs/heads/master/js/md5.min.js
-// @match        https://tuwel.tuwien.ac.at/mod/quiz/view.php*
-// @match        https://tuwel.tuwien.ac.at/mod/quiz/attempt.php*
 // @match        https://*/mod/quiz/view.php*
 // @match        https://*/mod/quiz/attempt.php*
 // @match        http://*/mod/quiz/view.php*
 // @match        http://*/mod/quiz/attempt.php*
+// @match        file://*/*.html
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=tuwel.tuwien.ac.at
 // @homepageURL  https://github.com/maximilian-sh/TuQsAi
 // @downloadURL  https://raw.githubusercontent.com/maximilian-sh/TuQsAi/main/TuQsAi.user.js
@@ -42,12 +41,38 @@
         answerQuiz: "answerQuiz",
     };
 
-    const HREF = new URL(window.location.toString());
-    const STATE = HREF.pathname.includes("view.php") ? STATES.viewQuiz : STATES.answerQuiz;
+    function detectPageInfo() {
+        let url = null;
 
-    const isTUWEL = HREF.hostname.includes("tuwel.tuwien.ac.at");
-    const isMoodle = HREF.pathname.includes("/mod/quiz/");
-    const MOODLE_INSTANCE = isTUWEL ? "TUWEL" : isMoodle ? "Moodle" : "Unknown";
+        const savedUrlMatch = document.documentElement.outerHTML.match(/<!-- saved from url=\([^)]+\)(https?:\/\/[^\s>]+)/);
+        if (savedUrlMatch) {
+            try {
+                url = new URL(savedUrlMatch[1]);
+            } catch (e) {
+                console.warn("TuQsAi: Could not parse saved URL:", e);
+            }
+        }
+
+        if (!url) {
+            try {
+                url = new URL(window.location.toString());
+            } catch (e) {
+                console.warn("TuQsAi: Could not parse current URL:", e);
+                return { state: STATES.answerQuiz };
+            }
+        }
+
+        const hasQuizElements = document.querySelector(".que") !== null;
+        const pathname = url.pathname || "";
+
+        const isQuizPage = pathname.includes("/mod/quiz/") || hasQuizElements;
+        const state = pathname.includes("view.php") ? STATES.viewQuiz : STATES.answerQuiz;
+
+        return { state };
+    }
+
+    const pageInfo = detectPageInfo();
+    const STATE = pageInfo.state;
 
     const QUESTION_TYPES = {
         multiplechoice: "multichoice",
@@ -1097,16 +1122,11 @@
     }
 
     $(document).ready(async function () {
-        console.log(`TuQsAi Script Loaded. Version 1.0. State: ${STATE}, Instance: ${MOODLE_INSTANCE}`);
+        console.log(`TuQsAi Script Loaded. Version 1.0. State: ${STATE}`);
         if (llmModel) console.log("TuQsAi: Using Model:", llmModel);
 
         if (STATE === STATES.answerQuiz) {
             console.log("TuQSLLM: Handling quiz attempt page.");
-
-            if (!isTUWEL && isMoodle) {
-                console.log("TuQsAi: Running on generic Moodle instance. Compatibility not guaranteed.");
-                console.log("TuQsAi: Originally designed for TUWEL. If issues occur, please report them.");
-            }
 
             console.log("TuQS LLM: Keyboard shortcuts available:");
             console.log("  - Press 'S': Solve next unsolved question");
