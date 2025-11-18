@@ -18,6 +18,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @connect      generativelanguage.googleapis.com
 // ==/UserScript==
 
@@ -26,7 +27,7 @@
 
     const CONFIG_API_KEY = "gemini_api_key";
     const CONFIG_MODEL = "gemini_model";
-    const DEFAULT_MODEL = "gemini-2.5-flash";
+    const DEFAULT_MODEL = "gemini-3-pro-preview";
     const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/";
 
     let llmApiKey = GM_getValue(CONFIG_API_KEY, null);
@@ -91,29 +92,22 @@
         QUESTION_TYPES.shortanswer,
         QUESTION_TYPES.numerical,
     ];
+
     function getImageMimeType(url) {
         if (typeof url !== "string") return null;
 
+        let extension = "";
         if (url.includes("pluginfile.php")) {
-            const extension = url.split(".").pop().toLowerCase();
-            switch (extension) {
-                case "png":
-                    return "image/png";
-                case "jpg":
-                case "jpeg":
-                    return "image/jpeg";
-                case "gif":
-                    return "image/gif";
-                case "webp":
-                    return "image/webp";
-                case "svg":
-                    return "image/svg+xml";
-                default:
-                    return "image/png";
-            }
+            extension = url.split(".").pop().toLowerCase();
+        } else {
+            extension = url.substring(url.lastIndexOf(".") + 1).toLowerCase();
         }
 
-        const extension = url.substring(url.lastIndexOf(".") + 1).toLowerCase();
+        // Remove query parameters if present (e.g. image.png?v=1)
+        if (extension.includes("?")) {
+            extension = extension.split("?")[0];
+        }
+
         switch (extension) {
             case "png":
                 return "image/png";
@@ -127,7 +121,9 @@
             case "svg":
                 return "image/svg+xml";
             default:
-                return null;
+                // Fallback for pluginfile.php which might not have clear extensions,
+                // or standard images.
+                return "image/png";
         }
     }
 
@@ -236,48 +232,6 @@
             .toLowerCase()
             .replace(/[\s\u00A0]+/g, " ")
             .trim();
-    }
-
-    function extractAndNormalizeText(element) {
-        const rawText = element.text();
-        if (typeof rawText !== "string") {
-            return { full: "", english: null, german: null };
-        }
-
-        const cleanedRawText = rawText
-            .trim()
-            .replace(/^\s*(([0-9]+|[a-zA-Z])[.)]|[-*])\s*/, "")
-            .trim();
-
-        const normalizedFullText = normalizeTextForComparison(cleanedRawText);
-        let normalizedEnglishText = null;
-        let normalizedGermanText = null;
-        const lowerCleanedRawText = cleanedRawText.toLowerCase();
-
-        const enMarker = "en:";
-        const deMarker = "de:";
-        const enIndex = lowerCleanedRawText.indexOf(enMarker);
-        const deIndex = lowerCleanedRawText.indexOf(deMarker);
-
-        if (enIndex !== -1) {
-            const englishPart = cleanedRawText.substring(enIndex + enMarker.length);
-            normalizedEnglishText = normalizeTextForComparison(englishPart);
-        }
-
-        if (deIndex !== -1) {
-            const germanPartEnd = enIndex !== -1 && enIndex > deIndex ? enIndex : cleanedRawText.length;
-            const germanPart = cleanedRawText.substring(deIndex + deMarker.length, germanPartEnd);
-            normalizedGermanText = normalizeTextForComparison(germanPart);
-        }
-
-        if (normalizedEnglishText && !normalizedGermanText && deIndex === -1) {
-            normalizedGermanText = null;
-        }
-        if (normalizedGermanText && !normalizedEnglishText && enIndex === -1) {
-            normalizedEnglishText = null;
-        }
-
-        return { full: normalizedFullText, english: normalizedEnglishText, german: normalizedGermanText };
     }
 
     function getQuestionType(questionElement) {
@@ -1137,8 +1091,31 @@
     }
 
     $(document).ready(async function () {
-        console.log(`TuQsAi Script Loaded. Version 1.0. State: ${STATE}`);
+        console.log(`TuQsAi Script Loaded. Version 1.3.2. State: ${STATE}`);
         if (llmModel) console.log("TuQsAi: Using Model:", llmModel);
+
+        // Register Menu Commands
+        GM_registerMenuCommand("TuQsAi: Set Gemini API Key", () => {
+            const newKey = prompt("Enter your Google AI Studio API Key:", llmApiKey || "");
+            if (newKey !== null) {
+                const trimmedKey = newKey.trim();
+                GM_setValue(CONFIG_API_KEY, trimmedKey);
+                llmApiKey = trimmedKey;
+                console.log("TuQsAi: API Key updated.");
+                alert("TuQsAi: API Key saved.");
+            }
+        });
+
+        GM_registerMenuCommand("TuQsAi: Set Model", () => {
+            const newModel = prompt("Enter Gemini Model Name (e.g., gemini-1.5-flash, gemini-1.5-pro):", llmModel || DEFAULT_MODEL);
+            if (newModel !== null) {
+                const trimmedModel = newModel.trim();
+                GM_setValue(CONFIG_MODEL, trimmedModel);
+                llmModel = trimmedModel;
+                console.log("TuQsAi: Model updated to", trimmedModel);
+                alert(`TuQsAi: Model set to ${trimmedModel}`);
+            }
+        });
 
         if (STATE === STATES.answerQuiz) {
             console.log("TuQSLLM: Handling quiz attempt page.");
