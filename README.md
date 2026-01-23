@@ -27,11 +27,11 @@ AI-powered Moodle quiz assistant. Works on TUWEL and other Moodle instances.
 
 ## Advanced: Change AI Model
 
-Default: `gemini-2.5-flash`
+Default: `gemini-3-flash-preview`
 
 **To use different models**: Tampermonkey → Storage → `gemini_model`
 
--   `gemini-2.5-flash-lite` (faster, less accurate)
+-   `gemini-3-pro-preview` (faster, less accurate)
 -   `gemini-2.5-pro` (slower, more accurate)
 -   Any other Gemini model name
 
