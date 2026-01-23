@@ -31,8 +31,8 @@ Default: `gemini-3-flash-preview`
 
 **To use different models**: Tampermonkey → Storage → `gemini_model`
 
--   `gemini-3-pro-preview` (faster, less accurate)
--   `gemini-2.5-pro` (slower, more accurate)
+-   `gemini-3-pro-preview` (slower, more accurate)
+-   `gemini-2.5-pro` (slower, similar accurate)
 -   Any other Gemini model name
 
 ## Troubleshooting
