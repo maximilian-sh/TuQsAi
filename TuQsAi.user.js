@@ -27,7 +27,7 @@
 
     const CONFIG_API_KEY = "gemini_api_key";
     const CONFIG_MODEL = "gemini_model";
-    const DEFAULT_MODEL = "gemini-3-pro-preview";
+    const DEFAULT_MODEL = "gemini-3-flash-preview";
     const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/";
 
     let llmApiKey = GM_getValue(CONFIG_API_KEY, null);
