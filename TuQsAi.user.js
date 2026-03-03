@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         TuQsAi
-// @version      1.3.1
+// @version      1.3.3
 // @description  Solve Moodle quizzes with AI (originally for TUWEL, supports other Moodle instances).
 // @author       maximilian
 // @copyright    2025 maximilian, Adapted from Jakob Kinne's script
@@ -1091,7 +1091,7 @@
     }
 
     $(document).ready(async function () {
-        console.log(`TuQsAi Script Loaded. Version 1.3.2. State: ${STATE}`);
+        console.log(`TuQsAi Script Loaded. Version 1.3.3. State: ${STATE}`);
         if (llmModel) console.log("TuQsAi: Using Model:", llmModel);
 
         // Register Menu Commands
@@ -1107,7 +1107,7 @@
         });
 
         GM_registerMenuCommand("TuQsAi: Set Model", () => {
-            const newModel = prompt("Enter Gemini Model Name (e.g., gemini-1.5-flash, gemini-1.5-pro):", llmModel || DEFAULT_MODEL);
+            const newModel = prompt("Enter Gemini Model Name (e.g., gemini-3-flash-preview, gemini-3.1-pro-preview):", llmModel || DEFAULT_MODEL);
             if (newModel !== null) {
                 const trimmedModel = newModel.trim();
                 GM_setValue(CONFIG_MODEL, trimmedModel);
