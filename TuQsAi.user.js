@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         TuQsAi
-// @version      1.3.4
+// @version      1.3.5
 // @description  Solve Moodle quizzes with AI (originally for TUWEL, supports other Moodle instances).
 // @author       maximilian
 // @copyright    2025 maximilian, Adapted from Jakob Kinne's script
@@ -162,43 +162,55 @@
   }
 
   async function fetchImageAsBase64(imageUrl) {
-    return new Promise((resolve, reject) => {
-      let sanitizedUrl = imageUrl;
-      try {
-        if (imageUrl.startsWith("/")) {
+    let sanitizedUrl = imageUrl;
+    try {
+      if (imageUrl.startsWith("/")) {
+        sanitizedUrl = new URL(imageUrl, window.location.origin).href;
+      } else if (imageUrl.includes("pluginfile.php")) {
+        if (!imageUrl.startsWith("http")) {
           sanitizedUrl = new URL(imageUrl, window.location.origin).href;
-        } else if (imageUrl.includes("pluginfile.php")) {
-          if (!imageUrl.startsWith("http")) {
-            sanitizedUrl = new URL(imageUrl, window.location.origin).href;
-          }
-        } else if (!imageUrl.startsWith("http")) {
-          sanitizedUrl = new URL(imageUrl, window.location.href).href;
         }
-      } catch (e) {
-        console.warn(`TuQS LLM: Error sanitizing URL ${imageUrl}:`, e);
-        sanitizedUrl = imageUrl;
+      } else if (!imageUrl.startsWith("http")) {
+        sanitizedUrl = new URL(imageUrl, window.location.href).href;
       }
+    } catch (e) {
+      console.warn(`TuQS LLM: Error sanitizing URL ${imageUrl}:`, e);
+      sanitizedUrl = imageUrl;
+    }
 
-      const mimeType = getImageMimeType(sanitizedUrl);
+    const mimeType = getImageMimeType(sanitizedUrl);
+    if (!mimeType) {
+      console.warn(`TuQS LLM: Unsupported image type for ${sanitizedUrl}`);
+      throw new Error(`Unsupported image type: ${sanitizedUrl}`);
+    }
 
-      if (!mimeType) {
-        console.warn(`TuQS LLM: Unsupported image type for ${sanitizedUrl}`);
-        reject(new Error(`Unsupported image type: ${sanitizedUrl}`));
-        return;
+    if (mimeType === "image/svg+xml") {
+      return convertSvgToPng(sanitizedUrl);
+    }
+
+    console.log(`TuQS LLM: Fetching image from ${sanitizedUrl} with MIME type ${mimeType}`);
+
+    let isSameOrigin = false;
+    try {
+      isSameOrigin = new URL(sanitizedUrl).origin === window.location.origin;
+    } catch (e) {}
+
+    if (isSameOrigin) {
+      const response = await fetch(sanitizedUrl, { credentials: "include" });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
       }
-
-      if (mimeType === "image/svg+xml") {
-        convertSvgToPng(sanitizedUrl)
-          .then(resolve)
-          .catch((error) => {
-            console.warn(`TuQS LLM: Failed to convert SVG to PNG for ${sanitizedUrl}:`, error.message);
-            reject(error);
-          });
-        return;
+      const contentType = (response.headers.get("content-type") || "").split(";")[0].trim();
+      if (contentType && !contentType.startsWith("image/")) {
+        console.error(`TuQS LLM: Expected image but got "${contentType}" for ${sanitizedUrl} — possible auth redirect`);
+        throw new Error(`Expected image but got ${contentType}`);
       }
+      const arrayBuffer = await response.arrayBuffer();
+      const base64 = btoa(new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), ""));
+      return { mimeType, data: base64 };
+    }
 
-      console.log(`TuQS LLM: Fetching image from ${sanitizedUrl} with MIME type ${mimeType}`);
-
+    return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: "GET",
         url: sanitizedUrl,
@@ -206,11 +218,14 @@
         timeout: 10000,
         onload: function (response) {
           if (response.status === 200) {
+            const contentType = response.responseHeaders?.match(/content-type:\s*([^\r\n;]+)/i)?.[1]?.trim();
+            if (contentType && !contentType.startsWith("image/")) {
+              console.error(`TuQS LLM: Expected image but got "${contentType}" for ${sanitizedUrl} — possible auth redirect`);
+              reject(new Error(`Expected image but got ${contentType}`));
+              return;
+            }
             const base64 = btoa(new Uint8Array(response.response).reduce((data, byte) => data + String.fromCharCode(byte), ""));
-            resolve({
-              mimeType: mimeType,
-              data: base64,
-            });
+            resolve({ mimeType, data: base64 });
           } else {
             console.error(`TuQS LLM: Failed to fetch image ${sanitizedUrl}: ${response.status} ${response.statusText}`);
             reject(new Error(`Failed to fetch image: ${response.status} ${response.statusText}`));
@@ -652,7 +667,7 @@
 
               if (
                 retryCount < maxRetries &&
-                (error.message.includes("timeout") || error.message.includes("network") || error.message.includes("INVALID_ARGUMENT"))
+                (error.message.includes("timeout") || error.message.includes("network"))
               ) {
                 retryCount++;
                 console.log(`TuQS LLM: Retrying request (${retryCount}/${maxRetries})...`);
@@ -1119,7 +1134,7 @@
   }
 
   $(document).ready(async function () {
-    console.log(`TuQsAi Script Loaded. Version 1.3.3. State: ${STATE}`);
+    console.log(`TuQsAi Script Loaded. Version 1.3.5. State: ${STATE}`);
     if (llmModel) console.log("TuQsAi: Using Model:", llmModel);
 
     // Register Menu Commands
