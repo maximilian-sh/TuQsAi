@@ -4,7 +4,7 @@ AI-powered Moodle quiz assistant. Works on TUWEL and other Moodle instances.
 
 ## Quick Setup
 
-1. **Install Tampermonkey** browser extension
+1. **Install Tampermonkey** browser extension (on iOS: Tampermonkey for Safari from the App Store)
 2. **Install script**: Click "Raw" on `TuQsAi.user.js` → Install in Tampermonkey
 3. **Get API key**: [Google AI Studio](https://aistudio.google.com/apikey) (free)
 4. **First use**: Open a quiz → Enter API key when prompted
@@ -15,6 +15,16 @@ AI-powered Moodle quiz assistant. Works on TUWEL and other Moodle instances.
 - **`Q`** - Solve all questions (press again to stop)
 - **`R`** - Redo last processed question
 - **`Escape`** - Stop processing
+
+### iPhone / iPad (Safari + Tampermonkey)
+
+Same functions via touch gestures, nothing is shown on screen:
+
+- **Two-finger tap on a question** - Solve that question (redo it if it is already answered)
+- **Two-finger tap outside a question** - Solve next question
+- **Two-finger double tap** - Solve all questions (do it again to stop)
+
+Open the quiz in Safari (not the Moodle app). Without a console you only see the result: answers get selected. If nothing happens, you are probably rate-limited, so wait a bit and try again.
 
 ## Features
 

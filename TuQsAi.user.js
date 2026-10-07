@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         TuQsAi
-// @version      1.4.0
+// @version      1.5.0
 // @description  Solve Moodle quizzes with AI (originally for TUWEL, supports other Moodle instances).
 // @author       maximilian
 // @copyright    2025 maximilian, Adapted from Jakob Kinne's script
@@ -1126,17 +1126,20 @@
       console.log("TuQS LLM: No previous question to redo.");
       return;
     }
+    await redoQuestion(lastProcessedQuestionIndex);
+  }
 
+  async function redoQuestion(questionIndex) {
     const questions = $(".que");
-    if (lastProcessedQuestionIndex >= questions.length) {
-      console.log("TuQS LLM: Last processed question index is invalid.");
+    if (questionIndex >= questions.length) {
+      console.log("TuQS LLM: Question index to redo is invalid.");
       return;
     }
 
-    console.log(`TuQS LLM: Redoing last processed question (${lastProcessedQuestionIndex + 1}) with full AI processing...`);
+    console.log(`TuQS LLM: Redoing question ${questionIndex + 1} with full AI processing...`);
 
     try {
-      const questionElement = questions[lastProcessedQuestionIndex];
+      const questionElement = questions[questionIndex];
       const $question = $(questionElement);
       const questionType = getQuestionType($question);
 
@@ -1148,15 +1151,100 @@
         $question.find("input[type='radio'], input[type='checkbox']").prop("checked", false);
       }
 
-      await processQuestion(questionElement, lastProcessedQuestionIndex);
+      await processQuestion(questionElement, questionIndex);
       console.log("TuQS LLM: Redo completed with full AI processing.");
     } catch (error) {
       console.error("TuQS LLM: Error during redo:", error);
     }
   }
 
+  // Touch equivalents of the keyboard shortcuts (no visible UI):
+  // - two-finger tap on a question: solve it, or redo it if it is already answered
+  // - two-finger tap outside a question: solve next unsolved question (like 'S')
+  // - two-finger double tap: solve all questions, or stop if processing (like 'Q')
+  const TWO_FINGER_TAP_MAX_MS = 400;
+  const TWO_FINGER_TAP_MAX_MOVE_PX = 20;
+  const DOUBLE_TAP_WINDOW_MS = 350;
+
+  function registerTouchGestures() {
+    let gesture = null;
+    let pendingTapTimer = null;
+
+    document.addEventListener(
+      "touchstart",
+      (e) => {
+        if (!gesture) {
+          gesture = { startTime: Date.now(), maxTouches: 0, start: new Map(), moved: false, target: e.target };
+        }
+        for (const touch of e.changedTouches) {
+          gesture.start.set(touch.identifier, { x: touch.clientX, y: touch.clientY });
+        }
+        gesture.maxTouches = Math.max(gesture.maxTouches, e.touches.length);
+      },
+      { passive: true },
+    );
+
+    document.addEventListener(
+      "touchmove",
+      (e) => {
+        if (!gesture) return;
+        for (const touch of e.changedTouches) {
+          const start = gesture.start.get(touch.identifier);
+          if (start && Math.hypot(touch.clientX - start.x, touch.clientY - start.y) > TWO_FINGER_TAP_MAX_MOVE_PX) {
+            gesture.moved = true;
+          }
+        }
+      },
+      { passive: true },
+    );
+
+    function onTouchEnd(e) {
+      if (!gesture || e.touches.length > 0) return;
+      const finished = gesture;
+      gesture = null;
+      if (e.type === "touchcancel") return;
+
+      const isTwoFingerTap =
+        finished.maxTouches === 2 && !finished.moved && Date.now() - finished.startTime <= TWO_FINGER_TAP_MAX_MS;
+      if (!isTwoFingerTap) return;
+
+      if (pendingTapTimer) {
+        clearTimeout(pendingTapTimer);
+        pendingTapTimer = null;
+        if (isProcessing) {
+          console.log("TuQS LLM: Stop processing gesture (two-finger double tap)");
+          stopProcessing();
+        } else {
+          console.log("TuQS LLM: Solve all questions gesture (two-finger double tap)");
+          solveAllQuestions();
+        }
+        return;
+      }
+
+      pendingTapTimer = setTimeout(() => {
+        pendingTapTimer = null;
+        const questionElement = $(finished.target).closest(".que")[0];
+        if (!questionElement) {
+          console.log("TuQS LLM: Next question gesture (two-finger tap)");
+          solveNextQuestion();
+          return;
+        }
+        const questionIndex = $(".que").index(questionElement);
+        console.log(`TuQS LLM: Question ${questionIndex + 1} gesture (two-finger tap)`);
+        if (isQuestionAnswered(questionElement)) {
+          redoQuestion(questionIndex);
+        } else {
+          processQuestion(questionElement, questionIndex);
+        }
+      }, DOUBLE_TAP_WINDOW_MS);
+    }
+
+    document.addEventListener("touchend", onTouchEnd, { passive: true });
+    document.addEventListener("touchcancel", onTouchEnd, { passive: true });
+  }
+
   $(document).ready(async function () {
-    console.log(`TuQsAi Script Loaded. Version 1.4.0. State: ${STATE}`);
+    console.log(`TuQsAi Script Loaded. Version 1.5.0. State: ${STATE}`);
     console.log("TuQsAi: Using Model:", llmModel, llmThinkingLevel ? `(thinking: ${llmThinkingLevel})` : "");
 
     // Register Menu Commands
@@ -1223,6 +1311,8 @@
           }
         }
       });
+
+      registerTouchGestures();
 
       const questions = $(".que");
       console.log(`TuQSLLM: Found ${questions.length} questions on the page.`);
