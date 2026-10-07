@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         TuQsAi
-// @version      1.3.5
+// @version      1.4.0
 // @description  Solve Moodle quizzes with AI (originally for TUWEL, supports other Moodle instances).
 // @author       maximilian
 // @copyright    2025 maximilian, Adapted from Jakob Kinne's script
-// @require      http://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js
-// @require      https://raw.githubusercontent.com/blueimp/JavaScript-MD5/refs/heads/master/js/md5.min.js
+// @require      https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js
+// @require      https://cdn.jsdelivr.net/npm/blueimp-md5@2.19.0/js/md5.min.js
 // @match        https://*/mod/quiz/view.php*
 // @match        https://*/mod/quiz/attempt.php*
 // @match        http://*/mod/quiz/view.php*
@@ -27,18 +27,34 @@
 
   const CONFIG_API_KEY = "gemini_api_key";
   const CONFIG_MODEL = "gemini_model";
-  const DEFAULT_MODEL = "gemini-3-flash-preview";
+  const CONFIG_THINKING_LEVEL = "gemini_thinking_level";
+  const DEFAULT_MODEL = "gemini-3.8-flash";
+  // Former defaults that are retired or access-limited. Installs that still have one of these
+  // stored get moved to DEFAULT_MODEL.
+  const LEGACY_DEFAULT_MODELS = [
+    "qwen-qwq-32b",
+    "gemini-2.5-flash-preview-04-17",
+    "gemini-2.5-flash-preview-05-20",
+    "gemini-2.5-flash-preview-09-2025",
+    "gemini-2.5-flash",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+  ];
   const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/";
   const RATE_LIMIT_FALLBACK_DELAY_MS = 8000;
   const RATE_LIMIT_BUFFER_MS = 1000;
 
   let llmApiKey = GM_getValue(CONFIG_API_KEY, null);
-  let llmModel = GM_getValue(CONFIG_MODEL, null);
-
-  if (!llmModel) {
-    llmModel = DEFAULT_MODEL;
-    GM_setValue(CONFIG_MODEL, DEFAULT_MODEL);
+  // An empty stored model means "use DEFAULT_MODEL", so future default bumps reach existing installs.
+  let llmModel = GM_getValue(CONFIG_MODEL, "");
+  if (LEGACY_DEFAULT_MODELS.includes(llmModel)) {
+    console.log(`TuQsAi: Stored model "${llmModel}" is outdated, switching to default ${DEFAULT_MODEL}.`);
+    GM_setValue(CONFIG_MODEL, "");
+    llmModel = "";
   }
+  if (!llmModel) llmModel = DEFAULT_MODEL;
+  // Optional: "low", "medium" or "high" (some models also accept "minimal"). Empty = model default.
+  const llmThinkingLevel = (GM_getValue(CONFIG_THINKING_LEVEL, "") || "").trim().toLowerCase();
   const STATES = {
     viewQuiz: "viewQuiz",
     answerQuiz: "answerQuiz",
@@ -463,7 +479,10 @@
       }
 
       const isDragAndDrop = responseFormat === "json";
-      const isShortAnswer = !isDragAndDrop && optionsWithImageData.length === 1 && optionsWithImageData[0].text === "shortanswer";
+      const isShortAnswer =
+        !isDragAndDrop &&
+        optionsWithImageData.length === 1 &&
+        [QUESTION_TYPES.shortanswer, QUESTION_TYPES.numerical].includes(optionsWithImageData[0].text);
 
       if (isShortAnswer || isDragAndDrop) {
       } else if (!optionsWithImageData || optionsWithImageData.length === 0) {
@@ -501,11 +520,11 @@
               const text = typeof opt === "string" ? opt : opt.text;
               return `- "${text}"`;
             })
-            .join("\\n");
+            .join("\n");
           llmParts.push({
-            text: `The following is a question with placeholders (e.g., "Placeholder 1", "Placeholder 2") that need to be filled using items from a list of draggable options.\\n\\nQuestion Context & Placeholders:\\n${questionTextForPrompt}\\n(Identify where "Placeholder 1", "Placeholder 2", etc. fit in the above text/code based on the dropZoneIds: ${
+            text: `The following is a question with placeholders (e.g., "Placeholder 1", "Placeholder 2") that need to be filled using items from a list of draggable options.\n\nQuestion Context & Placeholders:\n${questionTextForPrompt}\n(Identify where "Placeholder 1", "Placeholder 2", etc. fit in the above text/code based on the dropZoneIds: ${
               dropZoneIds ? dropZoneIds.join(", ") : ""
-            })\\n\\nAvailable Draggable Options:\\n${optionsList}\\n\\nYour task is to determine which draggable option fits best into each placeholder. Respond ONLY with a valid JSON object mapping each placeholder ID (as a string key, e.g., "1", "2") to the exact text of the draggable option that should go there (as a string value).\\n\\nExample Response Format:\\n{\\n  "1": "SELECT",\\n  "2": "x.speciality",\\n  "3": "COUNT(*)"\\n  ...\\n}\\n\\nDo not include any other text, explanations, or markdown formatting outside the JSON object. The JSON should be the only content in your response.`,
+            })\n\nAvailable Draggable Options:\n${optionsList}\n\nYour task is to determine which draggable option fits best into each placeholder. Respond ONLY with a valid JSON object mapping each placeholder ID (as a string key, e.g., "1", "2") to the exact text of the draggable option that should go there (as a string value).\n\nExample Response Format:\n{\n  "1": "SELECT",\n  "2": "x.speciality",\n  "3": "COUNT(*)"\n  ...\n}\n\nDo not include any other text, explanations, or markdown formatting outside the JSON object. The JSON should be the only content in your response.`,
           });
         } else {
           llmParts.push({ text: `Question:\n${questionTextForPrompt}\n\n` });
@@ -540,21 +559,24 @@
         });
       }
 
-      const apiUrl = `${GEMINI_API_BASE_URL}${llmModel}:generateContent?key=${llmApiKey}`;
-      const maxRetries = 2;
+      const apiUrl = `${GEMINI_API_BASE_URL}${llmModel}:generateContent`;
+      // Gemini 3 models are tuned for the default temperature (1.0); lowering it can cause looping.
+      const generationConfig = {};
+      if (llmThinkingLevel) {
+        generationConfig.thinkingConfig = { thinkingLevel: llmThinkingLevel };
+      }
+      const maxRetries = 3;
       let retryCount = 0;
 
       function makeRequest() {
         GM_xmlhttpRequest({
           method: "POST",
           url: apiUrl,
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "x-goog-api-key": llmApiKey },
           data: JSON.stringify({
             contents: [{ role: "user", parts: llmParts }],
             systemInstruction: { parts: [{ text: systemInstructionText }] },
-            generationConfig: {
-              temperature: 0.1,
-            },
+            generationConfig,
           }),
           timeout: 120000,
           onload: function (response) {
@@ -572,41 +594,40 @@
                   throw new Error(
                     `Rate limit exceeded. Please wait ${retryDelay} before trying again. Consider upgrading to paid tier for higher limits.`,
                   );
-                } else if (errorCode === 503) {
-                  console.warn(`TuQS LLM: Model overloaded. Message: ${errorMessage}`);
-                  throw new Error(`Model is currently overloaded. Please try again in a few minutes.`);
+                } else if (errorCode === 500 || errorCode === 503) {
+                  console.warn(`TuQS LLM: Model overloaded or unavailable. Message: ${errorMessage}`);
+                  const overloadError = new Error(`Model is currently overloaded. Please try again in a few minutes.`);
+                  overloadError.retryable = true;
+                  throw overloadError;
+                } else if (errorCode === 404) {
+                  console.error(`TuQS LLM: Model "${llmModel}" not found: ${errorMessage}`);
+                  throw new Error(
+                    `Model "${llmModel}" is not available (retired or misspelled). Use the "TuQsAi: Set Model" menu and leave it empty to reset to ${DEFAULT_MODEL}.`,
+                  );
                 } else {
                   console.error(`TuQS LLM: API Error ${errorCode}: ${errorMessage}`);
                   throw new Error(`API Error ${errorCode}: ${errorMessage}`);
                 }
               }
 
-              let rawCompletion = "";
-              if (
-                responseData.candidates &&
-                responseData.candidates.length > 0 &&
-                responseData.candidates[0].content &&
-                responseData.candidates[0].content.parts &&
-                responseData.candidates[0].content.parts.length > 0 &&
-                responseData.candidates[0].content.parts[0].text
-              ) {
-                rawCompletion = responseData.candidates[0].content.parts[0].text;
-              } else if (responseData.promptFeedback && responseData.promptFeedback.blockReason) {
-                const blockReason = responseData.promptFeedback.blockReason;
-                const safetyRatings = responseData.promptFeedback.safetyRatings || [];
-                let blockDetails = `Block reason: ${blockReason}.`;
-                if (safetyRatings.length > 0) {
-                  blockDetails += ` Safety ratings: ${safetyRatings.map((r) => `${r.category} - ${r.probability}`).join(", ")}`;
+              // Thinking models may split the answer over several parts; skip thought summaries.
+              const rawCompletion = (responseData.candidates?.[0]?.content?.parts || [])
+                .filter((part) => typeof part.text === "string" && !part.thought)
+                .map((part) => part.text)
+                .join("");
+              if (!rawCompletion) {
+                if (responseData.promptFeedback && responseData.promptFeedback.blockReason) {
+                  const blockReason = responseData.promptFeedback.blockReason;
+                  const safetyRatings = responseData.promptFeedback.safetyRatings || [];
+                  let blockDetails = `Block reason: ${blockReason}.`;
+                  if (safetyRatings.length > 0) {
+                    blockDetails += ` Safety ratings: ${safetyRatings.map((r) => `${r.category} - ${r.probability}`).join(", ")}`;
+                  }
+                  console.error("TuQS LLM: Prompt blocked by Gemini.", blockDetails, "Full feedback:", responseData.promptFeedback);
+                  throw new Error(`LLM prompt blocked: ${blockReason}. Check console for details.`);
                 }
-                console.error("TuQS LLM: Prompt blocked by Gemini.", blockDetails, "Full feedback:", responseData.promptFeedback);
-                throw new Error(`LLM prompt blocked: ${blockReason}. Check console for details.`);
-              } else {
                 console.error("TuQS LLM: Gemini response format unexpected:", responseData);
-                throw new Error("Gemini response format unexpected. Check API documentation or raw response.");
-              }
-
-              if (!rawCompletion && !(responseData.promptFeedback && responseData.promptFeedback.blockReason)) {
-                throw new Error("LLM response format unexpected or empty completion, and not blocked.");
+                throw new Error("Gemini response format unexpected or empty completion. Check API documentation or raw response.");
               }
 
               let cleanedCompletion = rawCompletion.replace(/<think>.*?<\/think>/gs, "").trim();
@@ -614,7 +635,7 @@
 
               if (isDragAndDrop) {
                 let jsonString = cleanedCompletion.trim();
-                const jsonMatch = jsonString.match(/```json\\n(\{[\s\S]*?\})\\n```/s);
+                const jsonMatch = jsonString.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
                 if (jsonMatch && jsonMatch[1]) {
                   jsonString = jsonMatch[1];
                 } else {
@@ -667,11 +688,12 @@
 
               if (
                 retryCount < maxRetries &&
-                (error.message.includes("timeout") || error.message.includes("network"))
+                (error.retryable || error.message.includes("timeout") || error.message.includes("network"))
               ) {
                 retryCount++;
-                console.log(`TuQS LLM: Retrying request (${retryCount}/${maxRetries})...`);
-                setTimeout(makeRequest, 2000 * retryCount);
+                const retryDelayMs = 2000 * 2 ** retryCount;
+                console.log(`TuQS LLM: Retrying request in ${retryDelayMs / 1000}s (${retryCount}/${maxRetries})...`);
+                setTimeout(makeRequest, retryDelayMs);
               } else {
                 reject("Failed to parse Gemini response: " + error.message);
               }
@@ -1134,8 +1156,8 @@
   }
 
   $(document).ready(async function () {
-    console.log(`TuQsAi Script Loaded. Version 1.3.5. State: ${STATE}`);
-    if (llmModel) console.log("TuQsAi: Using Model:", llmModel);
+    console.log(`TuQsAi Script Loaded. Version 1.4.0. State: ${STATE}`);
+    console.log("TuQsAi: Using Model:", llmModel, llmThinkingLevel ? `(thinking: ${llmThinkingLevel})` : "");
 
     // Register Menu Commands
     GM_registerMenuCommand("TuQsAi: Set Gemini API Key", () => {
@@ -1150,13 +1172,16 @@
     });
 
     GM_registerMenuCommand("TuQsAi: Set Model", () => {
-      const newModel = prompt("Enter Gemini Model Name (e.g., gemini-3-flash-preview, gemini-3.1-pro-preview):", llmModel || DEFAULT_MODEL);
+      const newModel = prompt(
+        `Enter Gemini model name (e.g., gemini-3.8-flash, gemini-3.1-pro-preview). Leave empty for the default (${DEFAULT_MODEL}):`,
+        llmModel,
+      );
       if (newModel !== null) {
         const trimmedModel = newModel.trim();
         GM_setValue(CONFIG_MODEL, trimmedModel);
-        llmModel = trimmedModel;
-        console.log("TuQsAi: Model updated to", trimmedModel);
-        alert(`TuQsAi: Model set to ${trimmedModel}`);
+        llmModel = trimmedModel || DEFAULT_MODEL;
+        console.log("TuQsAi: Model updated to", llmModel);
+        alert(`TuQsAi: Model set to ${llmModel}`);
       }
     });
 

@@ -27,29 +27,37 @@ AI-powered Moodle quiz assistant. Works on TUWEL and other Moodle instances.
 
 ## Advanced: Change AI Model
 
-Default: `gemini-3-flash-preview`
+Default: `gemini-3.8-flash` (stable, free tier available)
 
-**To use different models**: Tampermonkey → Storage → `gemini_model`
+**To use a different model**: Tampermonkey menu → `TuQsAi: Set Model` (leave empty to go back to the default), or Tampermonkey → Storage → `gemini_model`.
 
-- Recommended default: `gemini-3-flash-preview` (free tier available, strong quality/speed)
-- Cheaper option: `gemini-3.1-flash-lite-preview`
-- Higher reasoning quality: `gemini-3.1-pro-preview` (paid only)
+- Recommended default: `gemini-3.8-flash` (newest Flash, best quality/speed/price, free tier)
+- Cheaper / faster: `gemini-3.5-flash-lite` or `gemini-3.1-flash-lite`
+- Highest reasoning quality on hard, knowledge-heavy questions: `gemini-3.1-pro-preview` (paid only, preview)
+- Auto-follow the newest Flash: `gemini-flash-latest` (alias, can change without a script update)
 - You can set any Gemini model name manually
+
+Installs that still have an old default stored (e.g. `gemini-3-flash-preview`, `gemini-2.5-flash`) are switched to the new default automatically.
+
+**Thinking level (optional)**: Tampermonkey → Storage → `gemini_thinking_level` = `low`, `medium` or `high`. Empty uses the model default (`medium` on Gemini 3.x Flash). `high` is more accurate on tricky questions but slower; `minimal` is not supported by `gemini-3.8-flash`.
 
 ### Model Availability (Free vs Paid)
 
-Source: Gemini Developer API pricing page (last updated `2026-03-03`).
+Source: Gemini Developer API models and pricing pages (last checked `2026-10-07`). Prices are per 1M tokens (input / output) on the paid tier.
 
-Main multimodal Gemini models only (new generation):
-
-| Model | Model ID | Free Tier | Status |
-| --- | --- | --- | --- |
-| Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` | No (paid only) | Current (preview) |
-| Gemini 3.1 Flash-Lite Preview | `gemini-3.1-flash-lite-preview` | Yes | Current (preview) |
-| Gemini 3 Flash Preview | `gemini-3-flash-preview` | Yes | Current (preview) |
+| Model | Model ID | Free Tier | Paid price | Status |
+| --- | --- | --- | --- | --- |
+| Gemini 3.8 Flash | `gemini-3.8-flash` | Yes | $0.75 / $3.75 | Stable (default) |
+| Gemini 3.5 Flash-Lite | `gemini-3.5-flash-lite` | Yes | $0.30 / $2.50 | Stable |
+| Gemini 3.1 Flash-Lite | `gemini-3.1-flash-lite` | Yes | $0.25 / $1.50 | Stable |
+| Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` | No (paid only) | $2.00 / $12.00 | Preview |
+| Gemini 3 Flash Preview | `gemini-3-flash-preview` | — | — | Deprecated, use `gemini-3.8-flash` |
+| Gemini 2.5 (Flash / Pro) | `gemini-2.5-*` | — | — | Limited to legacy users |
 
 ## Troubleshooting
 
 - **Rate limits**: Free limits vary by model and change over time. Check the Gemini pricing page.
+- **"Model is currently overloaded" (503)**: The script retries automatically with backoff. If it keeps happening, try again later or switch to another model.
+- **"Model ... is not available" (404)**: The stored model was retired or misspelled. Reset it via `TuQsAi: Set Model` (leave empty).
 - **Not working**: Check console (F12) for errors
 - **Other Moodle**: May work but not guaranteed
