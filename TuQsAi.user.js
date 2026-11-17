@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         TuQsAi
-// @version      1.5.0
+// @version      2.0.0
 // @description  Solve Moodle quizzes with AI (originally for TUWEL, supports other Moodle instances).
 // @author       maximilian
 // @copyright    2025 maximilian, Adapted from Jakob Kinne's script
@@ -18,43 +18,35 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
-// @connect      generativelanguage.googleapis.com
+// @connect      api.mistral.ai
 // ==/UserScript==
 
 (async function () {
   "use strict";
 
-  const CONFIG_API_KEY = "gemini_api_key";
-  const CONFIG_MODEL = "gemini_model";
-  const CONFIG_THINKING_LEVEL = "gemini_thinking_level";
-  const DEFAULT_MODEL = "gemini-3.8-flash";
-  // Former defaults that are retired or access-limited. Installs that still have one of these
-  // stored get moved to DEFAULT_MODEL.
-  const LEGACY_DEFAULT_MODELS = [
-    "qwen-qwq-32b",
-    "gemini-2.5-flash-preview-04-17",
-    "gemini-2.5-flash-preview-05-20",
-    "gemini-2.5-flash-preview-09-2025",
-    "gemini-2.5-flash",
-    "gemini-3-pro-preview",
-    "gemini-3-flash-preview",
-  ];
-  const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/";
+  const CONFIG_API_KEY = "mistral_api_key";
+  const CONFIG_MODEL = "mistral_model";
+  const CONFIG_REASONING_EFFORT = "mistral_reasoning_effort";
+  const CONFIG_WEB_SEARCH = "mistral_web_search";
+  const DEFAULT_MODEL = "mistral-large-4";
+  const MISTRAL_CONVERSATIONS_URL = "https://api.mistral.ai/v1/conversations";
   const RATE_LIMIT_FALLBACK_DELAY_MS = 8000;
   const RATE_LIMIT_BUFFER_MS = 1000;
 
+  // Settings from the old Gemini backend are useless now (different keys and model names).
+  for (const legacyKey of ["gemini_api_key", "gemini_model", "gemini_thinking_level"]) {
+    if (GM_getValue(legacyKey, null) !== null) GM_deleteValue(legacyKey);
+  }
+
   let llmApiKey = GM_getValue(CONFIG_API_KEY, null);
   // An empty stored model means "use DEFAULT_MODEL", so future default bumps reach existing installs.
-  let llmModel = GM_getValue(CONFIG_MODEL, "");
-  if (LEGACY_DEFAULT_MODELS.includes(llmModel)) {
-    console.log(`TuQsAi: Stored model "${llmModel}" is outdated, switching to default ${DEFAULT_MODEL}.`);
-    GM_setValue(CONFIG_MODEL, "");
-    llmModel = "";
-  }
-  if (!llmModel) llmModel = DEFAULT_MODEL;
-  // Optional: "low", "medium" or "high" (some models also accept "minimal"). Empty = model default.
-  const llmThinkingLevel = (GM_getValue(CONFIG_THINKING_LEVEL, "") || "").trim().toLowerCase();
+  let llmModel = GM_getValue(CONFIG_MODEL, "") || DEFAULT_MODEL;
+  // Optional: "low", "medium" or "high". Empty = model default.
+  const llmReasoningEffort = (GM_getValue(CONFIG_REASONING_EFFORT, "") || "").trim().toLowerCase();
+  // The model decides per question whether a search is worth it; searches are billed per call.
+  let llmWebSearch = GM_getValue(CONFIG_WEB_SEARCH, true);
   const STATES = {
     viewQuiz: "viewQuiz",
     answerQuiz: "answerQuiz",
@@ -265,6 +257,37 @@
       .toLowerCase()
       .replace(/[\s\u00A0]+/g, " ")
       .trim();
+  }
+
+  function toImageChunk(imageData) {
+    return { type: "image_url", image_url: `data:${imageData.mimeType};base64,${imageData.data}` };
+  }
+
+  // Merges neighbouring text chunks so the request stays compact.
+  function mergeTextChunks(chunks) {
+    const merged = [];
+    for (const chunk of chunks) {
+      const last = merged[merged.length - 1];
+      if (chunk.type === "text" && last && last.type === "text") {
+        last.text += chunk.text;
+      } else {
+        merged.push({ ...chunk });
+      }
+    }
+    return merged;
+  }
+
+  // Extracts the final answer text from a /v1/conversations response, skipping thinking,
+  // tool executions and citation chunks.
+  function extractConversationText(responseData) {
+    const messages = (responseData.outputs || []).filter((entry) => entry.type === "message.output");
+    const content = messages[messages.length - 1]?.content;
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content
+      .filter((chunk) => chunk.type === "text" && typeof chunk.text === "string")
+      .map((chunk) => chunk.text)
+      .join("");
   }
 
   function parseRetryDelayToMs(retryDelay) {
@@ -490,10 +513,11 @@
       }
 
       if (!llmApiKey) {
-        llmApiKey = prompt("Gemini API Key not found. Please enter your Google AI Studio API key:");
+        llmApiKey = prompt("Mistral API Key not found. Please enter your Mistral API key (console.mistral.ai → API Keys):");
         if (llmApiKey && llmApiKey.trim()) {
-          GM_setValue(CONFIG_API_KEY, llmApiKey.trim());
-          console.log("TuQS LLM: Gemini API Key saved.");
+          llmApiKey = llmApiKey.trim();
+          GM_setValue(CONFIG_API_KEY, llmApiKey);
+          console.log("TuQS LLM: Mistral API Key saved.");
         } else {
           alert("No API Key provided. Script cannot get suggestions.");
           return reject("API Key not configured.");
@@ -522,112 +546,131 @@
             })
             .join("\n");
           llmParts.push({
+            type: "text",
             text: `The following is a question with placeholders (e.g., "Placeholder 1", "Placeholder 2") that need to be filled using items from a list of draggable options.\n\nQuestion Context & Placeholders:\n${questionTextForPrompt}\n(Identify where "Placeholder 1", "Placeholder 2", etc. fit in the above text/code based on the dropZoneIds: ${
               dropZoneIds ? dropZoneIds.join(", ") : ""
             })\n\nAvailable Draggable Options:\n${optionsList}\n\nYour task is to determine which draggable option fits best into each placeholder. Respond ONLY with a valid JSON object mapping each placeholder ID (as a string key, e.g., "1", "2") to the exact text of the draggable option that should go there (as a string value).\n\nExample Response Format:\n{\n  "1": "SELECT",\n  "2": "x.speciality",\n  "3": "COUNT(*)"\n  ...\n}\n\nDo not include any other text, explanations, or markdown formatting outside the JSON object. The JSON should be the only content in your response.`,
           });
         } else {
-          llmParts.push({ text: `Question:\n${questionTextForPrompt}\n\n` });
+          llmParts.push({ type: "text", text: `Question:\n${questionTextForPrompt}\n\n` });
         }
       }
 
       if (questionImagesData && questionImagesData.length > 0) {
         questionImagesData.forEach((imgData, idx) => {
           if (imgData && imgData.mimeType && imgData.data) {
-            llmParts.push({ inlineData: { mimeType: imgData.mimeType, data: imgData.data } });
+            llmParts.push(toImageChunk(imgData));
           }
         });
       }
 
       if (isDragAndDrop) {
       } else if (!isShortAnswer) {
-        llmParts.push({ text: "\nAvailable Options:\n" });
+        llmParts.push({ type: "text", text: "\nAvailable Options:\n" });
 
         optionsWithImageData.forEach((opt, index) => {
-          llmParts.push({ text: `${index + 1}. ${opt.text}\n` });
+          llmParts.push({ type: "text", text: `${index + 1}. ${opt.text}\n` });
           if (opt.imageData && opt.imageData.mimeType && opt.imageData.data) {
-            llmParts.push({ inlineData: { mimeType: opt.imageData.mimeType, data: opt.imageData.data } });
+            llmParts.push(toImageChunk(opt.imageData));
           }
         });
 
         llmParts.push({
+          type: "text",
           text: `\nConsider the context of a university course quiz. Respond ONLY with the number(s) corresponding to the correct option(s) from the list above.\n*   If it is likely a single-choice question, provide ONLY the single best answer number.\n*   If it is clearly a multiple-choice/select-all-that-apply question, list each correct number on a new line.\n\nDo not include the option text, introductory phrases like "The correct answer is:", or any explanations. \n**IMPORTANT: Do NOT include any reasoning, chain-of-thought, or XML/HTML tags (like <think>) in your response.** Just the raw number(s).`,
         });
       } else {
         llmParts.push({
+          type: "text",
           text: `\nFor this question, provide ONLY the numerical answer or exact text required. Do not include any explanations, units, or additional text. If the answer is a number, provide it as a plain number without any units or formatting.`,
         });
       }
 
-      const apiUrl = `${GEMINI_API_BASE_URL}${llmModel}:generateContent`;
-      // Gemini 3 models are tuned for the default temperature (1.0); lowering it can cause looping.
-      const generationConfig = {};
-      if (llmThinkingLevel) {
-        generationConfig.thinkingConfig = { thinkingLevel: llmThinkingLevel };
+      if (llmWebSearch) {
+        systemInstructionText +=
+          " You have a web_search tool. Use it when the question depends on specific facts, definitions, figures or recent information you are not certain about; skip it for questions you can answer reliably. The final reply must still follow the required answer format exactly, without citations.";
       }
+
+      const requestBody = {
+        model: llmModel,
+        store: false,
+        instructions: systemInstructionText,
+        inputs: [{ role: "user", content: mergeTextChunks(llmParts) }],
+      };
+      if (llmWebSearch) requestBody.tools = [{ type: "web_search" }];
+      if (llmReasoningEffort) requestBody.completion_args = { reasoning_effort: llmReasoningEffort };
+
       const maxRetries = 3;
       let retryCount = 0;
 
       function makeRequest() {
         GM_xmlhttpRequest({
           method: "POST",
-          url: apiUrl,
-          headers: { "Content-Type": "application/json", "x-goog-api-key": llmApiKey },
-          data: JSON.stringify({
-            contents: [{ role: "user", parts: llmParts }],
-            systemInstruction: { parts: [{ text: systemInstructionText }] },
-            generationConfig,
-          }),
+          url: MISTRAL_CONVERSATIONS_URL,
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            Authorization: `Bearer ${llmApiKey}`,
+          },
+          data: JSON.stringify(requestBody),
           timeout: 120000,
           onload: function (response) {
             try {
-              const responseData = JSON.parse(response.responseText);
+              const status = response.status;
+              let responseData = null;
+              try {
+                responseData = JSON.parse(response.responseText);
+              } catch (e) {
+                if (status >= 200 && status < 300) throw new Error("Mistral returned invalid JSON.");
+              }
 
-              if (responseData.error) {
-                const errorCode = responseData.error.code;
-                const errorMessage = responseData.error.message;
+              if (status < 200 || status >= 300) {
+                const errorMessage =
+                  responseData?.message ||
+                  (typeof responseData?.detail === "string" ? responseData.detail : JSON.stringify(responseData?.detail || "")) ||
+                  response.statusText ||
+                  "Unknown error";
 
-                if (errorCode === 429) {
-                  const retryDelay = responseData.error.details?.find((d) => d["@type"]?.includes("RetryInfo"))?.retryDelay || "8s";
-                  pendingRateLimitPauseMs = parseRetryDelayToMs(retryDelay) + RATE_LIMIT_BUFFER_MS;
-                  console.warn(`TuQS LLM: Rate limit exceeded. Retry in ${retryDelay}. Message: ${errorMessage}`);
+                if (status === 429) {
+                  const retryAfter = response.responseHeaders?.match(/retry-after:\s*([^\r\n]+)/i)?.[1]?.trim();
+                  pendingRateLimitPauseMs = parseRetryDelayToMs(retryAfter) + RATE_LIMIT_BUFFER_MS;
+                  console.warn(`TuQS LLM: Rate limit exceeded (retry-after: ${retryAfter || "n/a"}). Message: ${errorMessage}`);
+                  throw new Error(`Rate limit exceeded: ${errorMessage}`);
+                } else if (status >= 500) {
+                  console.warn(`TuQS LLM: Mistral server error ${status}. Message: ${errorMessage}`);
+                  const serverError = new Error(`Mistral server error ${status}. Please try again in a moment.`);
+                  serverError.retryable = true;
+                  throw serverError;
+                } else if (status === 401) {
+                  throw new Error('Invalid Mistral API key. Set a new one via the "TuQsAi: Set Mistral API Key" menu.');
+                } else if (status === 402) {
+                  throw new Error("Mistral API credits exhausted or billing not set up (console.mistral.ai → Billing).");
+                } else if (/model/i.test(errorMessage) && (status === 400 || status === 404)) {
+                  console.error(`TuQS LLM: Model "${llmModel}" rejected: ${errorMessage}`);
                   throw new Error(
-                    `Rate limit exceeded. Please wait ${retryDelay} before trying again. Consider upgrading to paid tier for higher limits.`,
-                  );
-                } else if (errorCode === 500 || errorCode === 503) {
-                  console.warn(`TuQS LLM: Model overloaded or unavailable. Message: ${errorMessage}`);
-                  const overloadError = new Error(`Model is currently overloaded. Please try again in a few minutes.`);
-                  overloadError.retryable = true;
-                  throw overloadError;
-                } else if (errorCode === 404) {
-                  console.error(`TuQS LLM: Model "${llmModel}" not found: ${errorMessage}`);
-                  throw new Error(
-                    `Model "${llmModel}" is not available (retired or misspelled). Use the "TuQsAi: Set Model" menu and leave it empty to reset to ${DEFAULT_MODEL}.`,
+                    `Model "${llmModel}" is not available (${errorMessage}). Use the "TuQsAi: Set Model" menu and leave it empty to reset to ${DEFAULT_MODEL}.`,
                   );
                 } else {
-                  console.error(`TuQS LLM: API Error ${errorCode}: ${errorMessage}`);
-                  throw new Error(`API Error ${errorCode}: ${errorMessage}`);
+                  console.error(`TuQS LLM: API Error ${status}: ${errorMessage}`);
+                  throw new Error(`API Error ${status}: ${errorMessage}`);
                 }
               }
 
-              // Thinking models may split the answer over several parts; skip thought summaries.
-              const rawCompletion = (responseData.candidates?.[0]?.content?.parts || [])
-                .filter((part) => typeof part.text === "string" && !part.thought)
-                .map((part) => part.text)
-                .join("");
+              const searches = (responseData.outputs || []).filter((entry) => entry.type === "tool.execution");
+              if (searches.length > 0) {
+                console.log(
+                  "TuQS LLM: Web searches:",
+                  searches.map((entry) => entry.arguments),
+                );
+              }
+              if (responseData.usage) console.log("TuQS LLM: Token usage:", responseData.usage);
+
+              const rawCompletion = extractConversationText(responseData);
               if (!rawCompletion) {
-                if (responseData.promptFeedback && responseData.promptFeedback.blockReason) {
-                  const blockReason = responseData.promptFeedback.blockReason;
-                  const safetyRatings = responseData.promptFeedback.safetyRatings || [];
-                  let blockDetails = `Block reason: ${blockReason}.`;
-                  if (safetyRatings.length > 0) {
-                    blockDetails += ` Safety ratings: ${safetyRatings.map((r) => `${r.category} - ${r.probability}`).join(", ")}`;
-                  }
-                  console.error("TuQS LLM: Prompt blocked by Gemini.", blockDetails, "Full feedback:", responseData.promptFeedback);
-                  throw new Error(`LLM prompt blocked: ${blockReason}. Check console for details.`);
-                }
-                console.error("TuQS LLM: Gemini response format unexpected:", responseData);
-                throw new Error("Gemini response format unexpected or empty completion. Check API documentation or raw response.");
+                console.error("TuQS LLM: Mistral response format unexpected:", responseData);
+                const emptyError = new Error("Mistral returned an empty answer.");
+                emptyError.retryable = true;
+                throw emptyError;
               }
 
               let cleanedCompletion = rawCompletion.replace(/<think>.*?<\/think>/gs, "").trim();
@@ -654,7 +697,7 @@
                   resolve(suggestionsMap);
                 } catch (parseError) {
                   console.error("TuQS LLM: Error parsing JSON response for drag-and-drop:", parseError);
-                  reject("Failed to parse Gemini JSON response: " + parseError.message);
+                  reject("Failed to parse Mistral JSON response: " + parseError.message);
                 }
               } else if (isShortAnswer) {
                 resolve([cleanedCompletion]);
@@ -676,14 +719,14 @@
                   .filter((s) => s !== null);
 
                 if (finalSuggestions.length === 0 && cleanedCompletion) {
-                  console.warn("TuQS LLM: Gemini response did not yield a valid option index from:", cleanedCompletion);
+                  console.warn("TuQS LLM: Mistral response did not yield a valid option index from:", cleanedCompletion);
                   resolve([cleanedCompletion]);
                 } else {
                   resolve(finalSuggestions);
                 }
               }
             } catch (error) {
-              console.error("TuQS LLM: Error parsing Gemini response:", error);
+              console.error("TuQS LLM: Error handling Mistral response:", error);
               console.error("TuQS LLM: Raw response text for debugging:", response.responseText);
 
               if (
@@ -695,30 +738,30 @@
                 console.log(`TuQS LLM: Retrying request in ${retryDelayMs / 1000}s (${retryCount}/${maxRetries})...`);
                 setTimeout(makeRequest, retryDelayMs);
               } else {
-                reject("Failed to parse Gemini response: " + error.message);
+                reject("Mistral request failed: " + error.message);
               }
             }
           },
           onerror: function (error) {
-            console.error("TuQS LLM: Gemini request error:", error);
+            console.error("TuQS LLM: Mistral request error:", error);
 
             if (retryCount < maxRetries) {
               retryCount++;
               console.log(`TuQS LLM: Retrying request after error (${retryCount}/${maxRetries})...`);
               setTimeout(makeRequest, 2000 * retryCount);
             } else {
-              reject("Gemini request failed: " + JSON.stringify(error));
+              reject("Mistral request failed: " + JSON.stringify(error));
             }
           },
           ontimeout: function () {
-            console.error("TuQS LLM: Gemini request timed out.");
+            console.error("TuQS LLM: Mistral request timed out.");
 
             if (retryCount < maxRetries) {
               retryCount++;
               console.log(`TuQS LLM: Retrying request after timeout (${retryCount}/${maxRetries})...`);
               setTimeout(makeRequest, 2000 * retryCount);
             } else {
-              reject("Gemini request timed out.");
+              reject("Mistral request timed out.");
             }
           },
         });
@@ -1244,12 +1287,17 @@
   }
 
   $(document).ready(async function () {
-    console.log(`TuQsAi Script Loaded. Version 1.5.0. State: ${STATE}`);
-    console.log("TuQsAi: Using Model:", llmModel, llmThinkingLevel ? `(thinking: ${llmThinkingLevel})` : "");
+    console.log(`TuQsAi Script Loaded. Version 2.0.0. State: ${STATE}`);
+    console.log(
+      "TuQsAi: Using Mistral model:",
+      llmModel,
+      llmReasoningEffort ? `(reasoning: ${llmReasoningEffort})` : "",
+      `(web search: ${llmWebSearch ? "on" : "off"})`,
+    );
 
     // Register Menu Commands
-    GM_registerMenuCommand("TuQsAi: Set Gemini API Key", () => {
-      const newKey = prompt("Enter your Google AI Studio API Key:", llmApiKey || "");
+    GM_registerMenuCommand("TuQsAi: Set Mistral API Key", () => {
+      const newKey = prompt("Enter your Mistral API Key (console.mistral.ai → API Keys):", llmApiKey || "");
       if (newKey !== null) {
         const trimmedKey = newKey.trim();
         GM_setValue(CONFIG_API_KEY, trimmedKey);
@@ -1261,7 +1309,7 @@
 
     GM_registerMenuCommand("TuQsAi: Set Model", () => {
       const newModel = prompt(
-        `Enter Gemini model name (e.g., gemini-3.8-flash, gemini-3.1-pro-preview). Leave empty for the default (${DEFAULT_MODEL}):`,
+        `Enter Mistral model ID (e.g., mistral-large-4, deepseek-v4-1-flash-1017, mistral-medium-latest). Leave empty for the default (${DEFAULT_MODEL}):`,
         llmModel,
       );
       if (newModel !== null) {
@@ -1271,6 +1319,13 @@
         console.log("TuQsAi: Model updated to", llmModel);
         alert(`TuQsAi: Model set to ${llmModel}`);
       }
+    });
+
+    GM_registerMenuCommand("TuQsAi: Toggle Web Search", () => {
+      llmWebSearch = !llmWebSearch;
+      GM_setValue(CONFIG_WEB_SEARCH, llmWebSearch);
+      console.log("TuQsAi: Web search", llmWebSearch ? "enabled" : "disabled");
+      alert(`TuQsAi: Web search ${llmWebSearch ? "enabled" : "disabled"}`);
     });
 
     if (STATE === STATES.answerQuiz) {

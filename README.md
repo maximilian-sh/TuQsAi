@@ -6,7 +6,7 @@ AI-powered Moodle quiz assistant. Works on TUWEL and other Moodle instances.
 
 1. **Install Tampermonkey** browser extension (on iOS: Tampermonkey for Safari from the App Store)
 2. **Install script**: Click "Raw" on `TuQsAi.user.js` → Install in Tampermonkey
-3. **Get API key**: [Google AI Studio](https://aistudio.google.com/apikey) (free)
+3. **Get API key**: [Mistral console](https://console.mistral.ai/api-keys) (Le Chat Pro includes $15/month API credits)
 4. **First use**: Open a quiz → Enter API key when prompted
 
 ## Usage
@@ -35,39 +35,41 @@ Open the quiz in Safari (not the Moodle app). Without a console you only see the
 - Manual control only
 - Redo functionality - reapply last question's solution
 
-## Advanced: Change AI Model
+## Advanced: Model & Settings
 
-Default: `gemini-3.8-flash` (stable, free tier available)
+Backend: Mistral Conversations API (`api.mistral.ai/v1/conversations`).
 
-**To use a different model**: Tampermonkey menu → `TuQsAi: Set Model` (leave empty to go back to the default), or Tampermonkey → Storage → `gemini_model`.
+Default model: `mistral-large-4` (Mistral's flagship, GA, image input, 1M context, lowest hallucination rate of the options below).
 
-- Recommended default: `gemini-3.8-flash` (newest Flash, best quality/speed/price, free tier)
-- Cheaper / faster: `gemini-3.5-flash-lite` or `gemini-3.1-flash-lite`
-- Highest reasoning quality on hard, knowledge-heavy questions: `gemini-3.1-pro-preview` (paid only, preview)
-- Auto-follow the newest Flash: `gemini-flash-latest` (alias, can change without a script update)
-- You can set any Gemini model name manually
+**Tampermonkey menu:**
 
-Installs that still have an old default stored (e.g. `gemini-3-flash-preview`, `gemini-2.5-flash`) are switched to the new default automatically.
+- `TuQsAi: Set Mistral API Key`
+- `TuQsAi: Set Model` (leave empty to go back to the default)
+- `TuQsAi: Toggle Web Search` (on by default)
 
-**Thinking level (optional)**: Tampermonkey → Storage → `gemini_thinking_level` = `low`, `medium` or `high`. Empty uses the model default (`medium` on Gemini 3.x Flash). `high` is more accurate on tricky questions but slower; `minimal` is not supported by `gemini-3.8-flash`.
+**Web search**: The model gets Mistral's built-in `web_search` tool and decides per question whether to search (e.g. for specific facts, figures, recent information). Searches add ~5–10 s and extra cost (search results count as connector tokens, plus a per-call fee). Turn it off for pure calculation/logic quizzes. Searches are logged in the console (F12).
 
-### Model Availability (Free vs Paid)
+**Reasoning effort (optional)**: Tampermonkey → Storage → `mistral_reasoning_effort` = `low`, `medium` or `high`. Empty uses the model default.
 
-Source: Gemini Developer API models and pricing pages (last checked `2026-10-07`). Prices are per 1M tokens (input / output) on the paid tier.
+### Models (via Mistral API)
 
-| Model | Model ID | Free Tier | Paid price | Status |
-| --- | --- | --- | --- | --- |
-| Gemini 3.8 Flash | `gemini-3.8-flash` | Yes | $0.75 / $3.75 | Stable (default) |
-| Gemini 3.5 Flash-Lite | `gemini-3.5-flash-lite` | Yes | $0.30 / $2.50 | Stable |
-| Gemini 3.1 Flash-Lite | `gemini-3.1-flash-lite` | Yes | $0.25 / $1.50 | Stable |
-| Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` | No (paid only) | $2.00 / $12.00 | Preview |
-| Gemini 3 Flash Preview | `gemini-3-flash-preview` | — | — | Deprecated, use `gemini-3.8-flash` |
-| Gemini 2.5 (Flash / Pro) | `gemini-2.5-*` | — | — | Limited to legacy users |
+Prices per 1M tokens (input / output), from the Mistral docs (last checked `2026-11-17`).
+
+| Model | Model ID | Images | Web search | Price | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Mistral Large 4 | `mistral-large-4` | Yes | Yes | $0.70 / $2.10 | Default. GA, rarely makes things up |
+| DeepSeek V4.1 Flash | `deepseek-v4-1-flash-1017` | Yes | Built-in tools listed | $0.30 / $1.20 | Slightly more knowledge, faster, cheaper, but hallucinates much more often. Public preview |
+| Mistral Medium 3.5 | `mistral-medium-latest` | Yes | Yes | — | Cheaper Mistral model |
+| Z.ai GLM 5.3 | `zai-glm-5-3` | **No** | No | $1.40 / $4.40 | Strong reasoning, but text only: image questions will fail |
+
+Old Gemini settings (`gemini_api_key`, `gemini_model`, `gemini_thinking_level`) are removed automatically on first run of 2.0.0.
 
 ## Troubleshooting
 
-- **Rate limits**: Free limits vary by model and change over time. Check the Gemini pricing page.
-- **"Model is currently overloaded" (503)**: The script retries automatically with backoff. If it keeps happening, try again later or switch to another model.
-- **"Model ... is not available" (404)**: The stored model was retired or misspelled. Reset it via `TuQsAi: Set Model` (leave empty).
+- **Rate limits (429)**: "Solve all" pauses automatically and continues. Limits depend on your Mistral workspace tier (console.mistral.ai → Limits).
+- **"Invalid Mistral API key" (401)**: Set a new key via `TuQsAi: Set Mistral API Key`.
+- **"credits exhausted" (402)**: Check billing / remaining credits in the Mistral console.
+- **Server error (5xx)**: The script retries automatically with backoff.
+- **"Model ... is not available"**: The stored model was retired or misspelled. Reset it via `TuQsAi: Set Model` (leave empty).
 - **Not working**: Check console (F12) for errors
 - **Other Moodle**: May work but not guaranteed
